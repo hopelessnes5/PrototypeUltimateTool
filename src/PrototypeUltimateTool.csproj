@@ -1,0 +1,84 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <RootNamespace>PrototypeUltimateTool</RootNamespace>
+    <AssemblyName>PrototypeUltimateTool</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+
+  <!--
+    Nixson.Prototype1 and Nixson.Prototype2 are compiled into this EXE.
+    Nixson.Common is built from source as a separate intermediate assembly to
+    preserve the identity required by Gibbed.Prototype.FileFormats, then embedded.
+
+    The remaining Gibbed/System.Half assemblies are compile-time references and
+    embedded resources; the resolver loads them from the EXE at runtime.
+  -->
+  <!--
+    Gibbed.Prototype.FileFormats was compiled against the assembly identity
+    Nixson.Common, Version=1.0.0.0. Keep Nixson.Common as a separately compiled
+    project (from our source), then embed its output in this EXE. Compiling its
+    types directly into this assembly would not satisfy that metadata reference.
+  -->
+  <ItemGroup>
+    <Compile Remove="Source\Nixson.Common\**\*.cs" />
+    <ProjectReference Include="Source\Nixson.Common\Nixson.Common.csproj">
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Gibbed.IO">
+      <HintPath>Dependencies\Gibbed.IO.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Gibbed.Prototype.FileFormats">
+      <HintPath>Dependencies\Gibbed.Prototype.FileFormats.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Gibbed.Squish">
+      <HintPath>Dependencies\Gibbed.Squish.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Half">
+      <HintPath>Dependencies\System.Half.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Dependencies\Gibbed.IO.dll">
+      <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.Gibbed.IO.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Dependencies\Gibbed.Prototype.FileFormats.dll">
+      <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.Gibbed.Prototype.FileFormats.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Dependencies\Gibbed.Squish.dll">
+      <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.Gibbed.Squish.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Dependencies\System.Half.dll">
+      <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.System.Half.dll</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!-- The project reference above is built during ResolveReferences. Embed the
+       resulting source-built assembly only after that build has completed. -->
+  <Target Name="EmbedNixsonCommonAssembly" AfterTargets="ResolveReferences" Condition="'$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <NixsonCommonAssemblyPath>$(MSBuildProjectDirectory)\Source\Nixson.Common\bin\$(Configuration)\net48\Nixson.Common.dll</NixsonCommonAssemblyPath>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(NixsonCommonAssemblyPath)')"
+           Text="Nixson.Common was not built from source at '$(NixsonCommonAssemblyPath)'. Check the Source\Nixson.Common project reference." />
+    <ItemGroup>
+      <EmbeddedResource Include="$(NixsonCommonAssemblyPath)">
+        <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.Nixson.Common.dll</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+</Project>
