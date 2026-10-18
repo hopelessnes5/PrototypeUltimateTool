@@ -1,0 +1,416 @@
+﻿<?xml version='1.0' encoding='utf-8'?>
+<language code="ru" displayName="Русский" nativeName="Русский" culture="ru-RU">
+    <strings>
+        <string key="menu.file">Файл</string>
+        <string key="menu.edit">Правка</string>
+        <string key="menu.view">Вид</string>
+        <string key="menu.help">Справка</string>
+        <string key="cmd.file.new">Создать</string>
+        <string key="cmd.file.new.p3d">Pure3D без сжатия (.p3d)</string>
+        <string key="cmd.file.new.p3d.rz">Pure3D с RZ-сжатием (.p3d.rz)</string>
+        <string key="cmd.file.new.rcf">Архив RCF (.rcf)</string>
+        <string key="cmd.file.open">Открыть...</string>
+        <string key="cmd.file.recent">Недавние файлы</string>
+        <string key="cmd.file.add">Добавить файлы в текущий документ...</string>
+        <string key="cmd.file.save">Сохранить файл / архив</string>
+        <string key="cmd.file.saveAs">Сохранить файл / архив как...</string>
+        <string key="cmd.file.exportTextures">📁 Экспорт всех текстур...</string>
+        <string key="cmd.file.dumpP3D">📦 Распаковать весь P3D целиком (Dump)...</string>
+        <string key="cmd.file.exportRawChunks">Экспортировать сырые P3D-чанки выделенных элементов...</string>
+        <string key="cmd.file.unpackRcf">📂 Распаковать RCF-архив в папку...</string>
+        <string key="cmd.file.packRcf">📦 Собрать папку в RCF-архив...</string>
+        <string key="cmd.file.exit">Выход</string>
+        <string key="cmd.edit.undo">Отменить</string>
+        <string key="cmd.edit.redo">Повторить</string>
+        <string key="cmd.view.theme">Тёмная тема</string>
+        <string key="cmd.view.flipV">Инвертировать V текстуры</string>
+        <string key="cmd.view.sceneStats">Показывать статистику 3D</string>
+        <string key="menu.view.language">Язык</string>
+        <string key="cmd.view.resetSplitters">Сбросить пропорции (1/3 к 2/3)</string>
+        <string key="cmd.view.expandTree">Развернуть дерево</string>
+        <string key="cmd.view.collapseTree">Свернуть дерево</string>
+        <string key="cmd.help.log">Журнал событий...</string>
+        <string key="cmd.help.explorerIntegration">Интеграция с Проводником Windows...</string>
+        <string key="cmd.help.about">О программе</string>
+        <string key="cmd.toolbar.open">📂 Открыть</string>
+        <string key="cmd.toolbar.save">💾 Сохранить</string>
+        <string key="cmd.toolbar.exportSelected">📤 Экспорт выделенного</string>
+        <string key="cmd.toolbar.unpackRcf">📦 Распаковать RCF...</string>
+        <string key="cmd.search.clear">✕</string>
+        <string key="hint.search">Поиск по названию...</string>
+        <string key="hint.search.clear">Очистить поиск</string>
+        <string key="label.resourceType">Тип:</string>
+        <string key="hint.resourceType">Фильтр по расширению файла в RCF или по типу P3D-секции</string>
+        <string key="sort.default">По умолчанию</string>
+        <string key="sort.nameAsc">По имени (А → Я)</string>
+        <string key="sort.nameDesc">По имени (Я → А)</string>
+        <string key="sort.sizeDesc">По размеру (убыв.)</string>
+        <string key="sort.sizeAsc">По размеру (возр.)</string>
+        <string key="sort.resolutionDesc">По разрешению (убыв.)</string>
+        <string key="sort.resolutionAsc">По разрешению (возр.)</string>
+        <string key="sort.type">По типу</string>
+        <string key="filter.allTypes">Все типы</string>
+        <string key="filter.noExtension">(без расширения)</string>
+        <string key="filter.p3dPrefix">P3D: </string>
+        <string key="context.open">Открыть</string>
+        <string key="context.openWith">Открыть с помощью...</string>
+        <string key="context.exportSelected">📤 Экспортировать этот элемент...</string>
+        <string key="context.replace">📥 Заменить данные элемента...</string>
+        <string key="context.exportRawChunk">Экспортировать сырой P3D-чанк...</string>
+        <string key="context.importRawChunk">Импортировать сырой P3D-чанк...</string>
+        <string key="cmd.toolbar.exportSelected.multiple">📤 Экспорт выделенного ({0})</string>
+        <string key="context.exportSelected.multiple">📤 Экспортировать выбранные элементы ({0})...</string>
+        <string key="context.exportRawChunk.multiple">Экспортировать сырые P3D-чанки выделенных элементов ({0})...</string>
+        <string key="tree.tooltip.rcfPathPrefix">Путь в RCF: </string>
+        <string key="tree.tooltip.depthPrefix">Глубина: </string>
+        <string key="tree.tooltip.levelSuffix"> уровень</string>
+        <string key="tree.tooltip.p3dDepthPrefix">Глубина P3D: </string>
+        <string key="tree.tooltip.sourcePrefix">Источник: </string>
+        <string key="tree.tooltip.containerPrefix">Контейнер: </string>
+        <string key="tree.tooltip.pixelCountPrefix">Пикселей: </string>
+        <string key="view.mode2d">🖼️ 2D Текстура</string>
+        <string key="view.mode3d">🧊 3D Модель</string>
+        <string key="label.preset">Пресет:</string>
+        <string key="label.channels">Каналы:</string>
+        <string key="channel.preset.rgba">RGBA</string>
+        <string key="channel.preset.rgb">RGB</string>
+        <string key="channel.red">R</string>
+        <string key="channel.green">G</string>
+        <string key="channel.blue">B</string>
+        <string key="channel.alpha">A</string>
+        <string key="dialog.log.close">Закрыть</string>
+        <string key="dialog.log.refresh">Обновить</string>
+        <string key="dialog.log.copy">Копировать</string>
+        <string key="dialog.log.openFile">Открыть файл журнала</string>
+        <string key="dialog.about.close">Закрыть</string>
+        <string key="dialog.explorer.install">Добавить / обновить интеграцию</string>
+        <string key="dialog.explorer.remove">Удалить интеграцию</string>
+        <string key="dialog.explorer.defaults">Приложения по умолчанию...</string>
+        <string key="viewer.resetCamera">🏠 Сброс вида</string>
+        <string key="viewer.shading.label">Вид:</string>
+        <string key="viewer.flipUv">🔄 Инверт UV</string>
+        <string key="viewer.textureOverride">Автовыбор текстуры</string>
+        <string key="viewer.animation.label">Анимация:</string>
+        <string key="viewer.animation.play">▶</string>
+        <string key="viewer.animation.loop">↻</string>
+        <string key="viewer.animation.frameLabel">кадр —</string>
+        <string key="viewer.shading.wireframe">Каркас: вершины и рёбра</string>
+        <string key="viewer.shading.solid">Сплошная модель</string>
+        <string key="viewer.shading.textured">Текстуры</string>
+        <string key="viewer.shading.normals">Визуализация нормалей</string>
+        <string key="viewer.shading.skinning">Скиннинг / веса костей</string>
+        <string key="unit.byte">Б</string>
+        <string key="unit.kilobyte">КБ</string>
+        <string key="unit.megabyte">МБ</string>
+        <string key="unit.unknownSize">размер неизвестен</string>
+        <string key="dialog.about.repository">Открыть репозиторий на GitHub</string>
+        <string key="dialog.about.discord">Присоединиться к сообществу в Discord</string>
+        <string key="dialog.explorer.close">Закрыть</string>
+        <string key="label.recent.empty">(пока пусто)</string>
+        <string key="label.search">🔍</string>
+        <string key="dialog.about.window">О программе — Prototype Ultimate Tool</string>
+        <string key="dialog.about.appName">Prototype Ultimate Tool</string>
+        <string key="dialog.about.versionPrefix">Версия</string>
+        <string key="dialog.about.versionUnknown">Версия не указана</string>
+        <string key="dialog.about.description">Инструмент для просмотра и редактирования ресурсов Prototype: P3D, RZ и RCF.
+Просмотр текстур и моделей, работа с деревом чанков и содержимым архивов.</string>
+        <string key="dialog.about.projectHeader">О проекте</string>
+        <string key="dialog.about.credits">Репозиторий и сопровождение модификаций: hopelessnes5.
+Основа: EditP3D от Nixson. При адаптации форматов и поведения использовались материалы Elan-S/EditP3D и Gibbed.IO / Gibbed.Prototype.
+Сведения об исходных компонентах и лицензиях находятся в THIRD_PARTY_NOTICES.md.</string>
+        <string key="hint.sort">Сортировка элементов дерева</string>
+        <string key="tree.loading">Загрузка...</string>
+        <string key="tree.loadingP3D">Загрузка P3D...</string>
+        <string key="dialog.log.window">Журнал событий — Prototype Ultimate Tool</string>
+        <string key="dialog.log.empty">Журнал пока пуст.</string>
+        <string key="dialog.log.readError">Не удалось прочитать журнал: {0}</string>
+        <string key="dialog.log.copyError">Не удалось скопировать журнал: {0}</string>
+        <string key="dialog.log.openError">Не удалось открыть файл журнала: {0}</string>
+        <string key="dialog.log.caption">Журнал</string>
+        <string key="dialog.explorer.window">Интеграция с Проводником Windows</string>
+        <string key="dialog.explorer.heading">Prototype Ultimate Tool в Проводнике</string>
+        <string key="dialog.explorer.description">Добавляет пункт «Открыть в Prototype Ultimate Tool» в контекстное меню файлов .rcf, .p3d и .rz, а также регистрирует приложение в списке «Открыть с помощью». Изменения выполняются только для текущего пользователя и не требуют прав администратора.</string>
+        <string key="dialog.explorer.status.installed">Состояние: интеграция зарегистрирована для текущего расположения EXE.</string>
+        <string key="dialog.explorer.status.notInstalled">Состояние: интеграция не установлена или путь к EXE изменился.</string>
+        <string key="dialog.explorer.status.checkError">Не удалось проверить состояние: {0}</string>
+        <string key="dialog.explorer.caption">Prototype Ultimate Tool</string>
+        <string key="dialog.explorer.errorCaption">Ошибка интеграции</string>
+        <string key="dialog.explorer.removeCaption">Удаление интеграции</string>
+        <string key="dialog.explorer.defaultsCaption">Параметры Windows</string>
+        <string key="dialog.explorer.install.success">Интеграция с Проводником зарегистрирована.
+
+Щёлкни правой кнопкой по файлу .rcf, .p3d или .rz и выбери «Открыть в Prototype Ultimate Tool». В Windows 11 этот пункт может находиться в меню «Показать дополнительные параметры».
+
+Для открытия двойным щелчком выбери приложение отдельно в параметрах приложений по умолчанию Windows.</string>
+        <string key="dialog.explorer.install.error">Не удалось зарегистрировать интеграцию с Проводником.
+
+{0}</string>
+        <string key="dialog.explorer.remove.confirm">Удалить команды Prototype Ultimate Tool из контекстного меню и списка «Открыть с помощью»?
+
+Текущие приложения по умолчанию для файлов не будут изменены.</string>
+        <string key="dialog.explorer.remove.success">Интеграция удалена.</string>
+        <string key="dialog.explorer.remove.error">Не удалось удалить интеграцию.
+
+{0}</string>
+        <string key="dialog.explorer.defaults.error">Не удалось открыть параметры приложений по умолчанию.
+
+{0}</string>
+        <string key="dialog.import.rcf.title">Добавить файлы в корень открытого RCF-архива</string>
+        <string key="filter.allFiles">Все файлы (*.*)|*.*</string>
+        <string key="dialog.import.p3d.title">Добавить P3D-файлы или сырые P3D-секции</string>
+        <string key="filter.p3dSectionsAndRawChunks">Pure3D/сырые секции (*.p3d;*.rz;*.p3dchunk-*)|*.p3d;*.rz;*.p3dchunk-*|Все файлы (*.*)|*.*</string>
+        <string key="dialog.file.open.title">Открыть файл Prototype</string>
+        <string key="filter.openPrototype">Форматы Prototype (*.p3d;*.rz;*.rcf;*.p3dchunk-*)|*.p3d;*.rz;*.rcf;*.p3dchunk-*|Pure3D (*.p3d)|*.p3d|Архивы RCF (*.rcf)|*.rcf|Все файлы (*.*)|*.*</string>
+        <string key="dialog.file.save.rcf.title">Сохранить архив RCF</string>
+        <string key="filter.saveRcf">Архивы RCF (*.rcf)|*.rcf|Все файлы (*.*)|*.*</string>
+        <string key="dialog.file.save.p3d.title">Сохранить файл Pure3D</string>
+        <string key="filter.saveP3d">Pure3D без сжатия (*.p3d)|*.p3d|Pure3D с RZ-сжатием (*.p3d.rz)|*.p3d.rz|RZ (*.rz)|*.rz|Все файлы (*.*)|*.*</string>
+        <string key="dialog.export.textures.folderTitle">Выберите папку для экспорта текстур</string>
+        <string key="dialog.export.archiveEntry.title">Экспорт записи RCF</string>
+        <string key="dialog.export.mesh.title">Экспорт 3D-модели</string>
+        <string key="filter.exportMesh">Wavefront 3D (.obj для Blender)|*.obj|Сырой чанк {0}|*{0}|Все файлы (*.*)|*.*</string>
+        <string key="dialog.export.resource.title">Экспорт ресурса</string>
+        <string key="filter.exportResourceOrRawChunk">Экспорт ресурса ({0})|*{0}|Сырой чанк ({1})|*{1}|Все файлы (*.*)|*.*</string>
+        <string key="dialog.export.rawChunk.title">Экспорт сырого P3D-чанка</string>
+        <string key="filter.exportRawChunk">Сырой P3D-чанк ({0})|*{0}|Все файлы (*.*)|*.*</string>
+        <string key="dialog.export.selectedBatch.folderTitle">Выберите папку для экспорта {0} элементов</string>
+        <string key="dialog.export.rawBatch.folderTitle">Выберите папку для экспорта {0} сырых P3D-чанков</string>
+        <string key="dialog.import.rawChunk.title">Импорт сырого P3D-чанка</string>
+        <string key="filter.importRawChunk">Сырой чанк данного типа (*{0})|*{0}|P3D/RZ и любые файлы (*.*)|*.*</string>
+        <string key="dialog.replace.archiveEntry.title">Заменить содержимое записи RCF</string>
+        <string key="dialog.replace.resource.title">Выберите файл для замены данных</string>
+        <string key="filter.replaceTexture">DDS-текстуры (*.dds)|*.dds|Все файлы (*.*)|*.*</string>
+        <string key="dialog.unpackRcf.source.title">Выберите RCF-архив</string>
+        <string key="filter.rcfOnly">Архивы RCF (*.rcf)|*.rcf</string>
+        <string key="dialog.unpackRcf.folder.title">Выберите папку для распаковки RCF-архива</string>
+        <string key="dialog.packRcf.folder.title">Выберите папку для сборки RCF-архива</string>
+        <string key="dialog.packRcf.output.title">Сохранить RCF-архив</string>
+        <string key="caption.import.addFiles">Добавление файлов</string>
+        <string key="caption.import.rcf">Добавление файлов в RCF</string>
+        <string key="caption.import.p3d">Добавление в P3D</string>
+        <string key="caption.import.error">Ошибка импорта</string>
+        <string key="caption.import.rawChunk">Импорт сырого чанка</string>
+        <string key="caption.import">Импорт</string>
+        <string key="caption.export">Экспорт</string>
+        <string key="caption.error">Ошибка</string>
+        <string key="caption.export.selection">Экспорт выделения</string>
+        <string key="caption.export.rawChunks">Экспорт сырых P3D-чанков</string>
+        <string key="caption.rcf">RCF</string>
+        <string key="message.import.selectedRcf.failed">Не удалось открыть P3D-запись выбранного RCF.</string>
+        <string key="message.import.document.required">Сначала создайте или откройте P3D-документ либо RCF-архив.</string>
+        <string key="message.import.rcf.added">Добавлено в RCF: {0}.</string>
+        <string key="message.import.rcf.skipped">Пропущено (имена уже существуют или некорректны): {0}.</string>
+        <string key="message.common.errorsCount">Ошибки: {0}.</string>
+        <string key="message.common.andMore">
+… и ещё {0}.</string>
+        <string key="message.import.p3d.noneAdded">Не удалось добавить P3D-секции.
+{0}</string>
+        <string key="message.import.p3d.summary">Успешно обработано файлов: {0} из {1}.
+Добавлено корневых P3D-секций: {2}.</string>
+        <string key="message.import.p3d.types">
+Типы: {0}.</string>
+        <string key="message.import.p3d.errors">
+Ошибок: {0}. Полный список записан в журнал (Справка → Журнал событий).
+
+{1}</string>
+        <string key="message.import.p3d.commitError">Импорт разобран, но не удалось безопасно добавить секции в документ. Изменения откатаны насколько возможно.
+
+{0}
+
+Подробности: Справка → Журнал событий.</string>
+        <string key="message.export.textures.summary">Экспорт завершён!
+Успешно сохранено текстур: {0}</string>
+        <string key="message.export.selectionRequired">Сначала выделите один или несколько файлов/элементов в дереве слева.</string>
+        <string key="message.export.rcf.noData">У записи нет доступных данных.</string>
+        <string key="message.export.rcf.parseFailed">Не удалось разобрать P3D, содержащий выбранный элемент.</string>
+        <string key="message.export.p3d.dataMissing">Не удалось получить данные выбранного элемента P3D.</string>
+        <string key="message.export.rawChunk.fileSuccess">Сырой P3D-чанк экспортирован в файл {0}</string>
+        <string key="message.export.mesh.success">3D-модель успешно экспортирована в .OBJ!
+Теперь её можно открыть в Blender.</string>
+        <string key="message.export.mesh.noPolygons">Не удалось извлечь полигоны этой модели.</string>
+        <string key="message.export.resource.success">Элемент успешно экспортирован!</string>
+        <string key="message.export.rawChunk.success">Сырой P3D-чанк экспортирован!</string>
+        <string key="message.export.selection.summary">Экспорт выделения завершён.
+Успешно сохранено: {0} из {1}.</string>
+        <string key="message.export.selection.errors">
+Ошибок: {0}.
+
+{1}</string>
+        <string key="message.export.rawChunk.fileSuccessShort">Сырой чанк экспортирован: {0}</string>
+        <string key="message.export.rawChunk.failed">Не удалось экспортировать чанк: {0}</string>
+        <string key="message.export.rawBatch.summary">Экспорт сырых P3D-чанков завершён.
+Успешно: {0} из {1}.</string>
+        <string key="message.export.rawBatch.orderManifest">
+Сохранён исходный порядок {0} корневых секций в P3DChunkOrder.manifest.</string>
+        <string key="message.export.rawBatch.errors">
+Ошибок: {0}. Подробности: Справка → Журнал событий.
+
+{1}</string>
+        <string key="message.import.rawChunk.success">Сырой чанк импортирован. Сохраните документ, чтобы записать изменения.</string>
+        <string key="message.import.rawChunk.failed">Не удалось импортировать сырой чанк: {0}
+Подробности записаны в журнал: Справка → Журнал событий.</string>
+        <string key="message.replace.singleItemOnly">Замена данных выполняется для одного элемента. Выберите один файл или поддерживающий импорт элемент.</string>
+        <string key="message.replace.archive.noData">Для этой записи не найден блок данных.</string>
+        <string key="message.replace.archive.success">Данные записи заменены в памяти. Нажмите «Сохранить», чтобы записать изменения в RCF.</string>
+        <string key="message.replace.archive.failed">Ошибка замены записи: {0}</string>
+        <string key="message.replace.importableRequired">Выберите элемент, поддерживающий замену данных (например, текстуру).</string>
+        <string key="message.replace.rcf.success">Данные заменены внутри RCF в памяти. Нажмите «Сохранить», чтобы записать архив на диск.</string>
+        <string key="message.replace.p3d.success">Данные успешно заменены! Не забудьте сохранить P3D файл.</string>
+        <string key="message.replace.failed">Ошибка замены: {0}</string>
+        <string key="caption.open.failed">Не удалось открыть файл</string>
+        <string key="caption.recentFiles">Недавние файлы</string>
+        <string key="caption.aboutLink">Prototype Ultimate Tool</string>
+        <string key="caption.save">Сохранение</string>
+        <string key="caption.unsavedChanges">Несохранённые изменения</string>
+        <string key="caption.undo">Отмена</string>
+        <string key="caption.redo">Повтор</string>
+        <string key="caption.external">Внешние файлы</string>
+        <string key="caption.textureSearch">Поиск текстур</string>
+        <string key="caption.dumpP3D">Распаковка P3D</string>
+        <string key="cmd.edit.undo.withDescription">Отменить: {0}</string>
+        <string key="cmd.edit.redo.withDescription">Повторить: {0}</string>
+        <string key="message.open.shellFileMissing">Windows передал программе путь к файлу, но файл не найден:
+
+{0}
+
+Проверьте ассоциацию файлов и кавычки вокруг параметра %1.</string>
+        <string key="message.open.shellError">Не удалось открыть файл из Проводника:
+
+{0}</string>
+        <string key="message.open.rcfFailed">Ошибка открытия RCF: {0}</string>
+        <string key="message.open.fileFailed">Ошибка открытия файла: {0}</string>
+        <string key="message.recent.fileMissing">Файл больше не существует и удалён из списка недавних:
+{0}</string>
+        <string key="message.about.openLinkFailed">Не удалось открыть ссылку в браузере.
+
+{0}</string>
+        <string key="message.about.openDiscordFailed">Не удалось открыть ссылку Discord в браузере.
+
+{0}</string>
+        <string key="message.external.closeWarning">Есть файлы, открытые во внешних программах. После закрытия Prototype Ultimate Tool отслеживание их изменений прекратится.
+
+Убедитесь, что внешние редакторы закончили сохранение. Закрыть программу?</string>
+        <string key="message.document.unsavedOnExit">Есть несохранённые изменения в открытом документе. Сохранить перед выходом?</string>
+        <string key="message.document.unsavedBeforeOpen">В текущем документе есть изменения. Сохранить их перед открытием другого файла?</string>
+        <string key="message.rcf.syncP3dFailed">Не удалось синхронизировать P3D внутри RCF: {0}</string>
+        <string key="message.undo.failed">Не удалось отменить изменение: {0}</string>
+        <string key="message.redo.failed">Не удалось повторить изменение: {0}</string>
+        <string key="message.save.rcf.success">RCF архив успешно сохранён.</string>
+        <string key="message.save.rcf.failed">Ошибка сохранения RCF: {0}</string>
+        <string key="message.save.p3d.success">Файл успешно сохранен!</string>
+        <string key="message.save.p3d.failed">Ошибка сохранения: {0}</string>
+        <string key="message.textureSearch.stalePath">Не удалось повторно найти текстуру по сохранённому пути. Обновите фильтр.</string>
+        <string key="dialog.dumpP3D.folderTitle">Куда распаковать всё содержимое P3D?</string>
+        <string key="status.dumpP3D.progress">Распаковка P3D...</string>
+        <string key="message.dumpP3D.textureError">Текстура {0}: {1}</string>
+        <string key="message.dumpP3D.modelNoGroups">Модель {0}: экспортёр не нашёл пригодные группы геометрии.</string>
+        <string key="message.dumpP3D.modelError">Модель {0}: {1}</string>
+        <string key="message.dumpP3D.sectionError">Секция {0}: {1}</string>
+        <string key="message.dumpP3D.workerError">Ошибка фоновой распаковки: {0}</string>
+        <string key="message.dumpP3D.summary">Полный дамп P3D завершён!
+
+📁 Текстур (DDS): {0}
+🧊 3D-моделей (OBJ для Blender): {1}
+📦 Прочих узлов: {2}
+Ошибок/пропусков: {3}</string>
+        <string key="message.dumpP3D.details">
+
+Подробности записаны в Справка → Журнал событий.
+
+{0}</string>
+        <string key="message.external.unsupportedSelection">Выбранный элемент нельзя открыть во внешней программе.</string>
+        <string key="message.external.noReverseImport">Элемент экспортирован и открыт во внешней программе, но его формат не поддерживает обратный импорт. Изменения внешнего файла не попадут в документ.</string>
+        <string key="message.external.openFailed">Не удалось открыть внешний файл: {0}</string>
+        <string key="message.external.readWorkingCopyFailed">Не удалось прочитать рабочую копию после нескольких попыток: {0}
+Файл сохранён во временной папке; повторите сохранение во внешней программе.</string>
+        <string key="message.external.importFailed">Изменения внешнего файла не удалось импортировать после повторных попыток: {0}
+Рабочая копия сохранена. Проверьте формат файла и сохраните его повторно.</string>
+        <string key="message.external.stopTrackingPrompt">За изменениями файлов, открытых во внешних программах, сейчас ведётся наблюдение.
+
+Если открыть другой документ, наблюдение за текущими рабочими копиями будет остановлено. Убедитесь, что последние изменения уже импортированы.
+
+Продолжить?</string>
+        <string key="message.external.selectOneFirst">Сначала выберите файл или экспортируемый элемент в дереве.</string>
+        <string key="message.external.oneItemOnly">Открытие во внешней программе выполняется для одного элемента. Выберите один элемент.</string>
+        <string key="message.external.entryDataMissing">У выбранной записи нет данных.</string>
+        <string key="message.external.textureContainerParseFailed">Не удалось разобрать P3D, содержащий выбранную текстуру.</string>
+        <string key="message.external.itemContainerParseFailed">Не удалось разобрать P3D, содержащий выбранный элемент.</string>
+        <string key="message.external.selectExportableNotFolder">Выберите файл или поддерживающий экспорт элемент, а не папку.</string>
+        <string key="message.external.typeNotExportable">Этот тип секции пока нельзя экспортировать во внешний файл.</string>
+        <string key="message.rcf.unpack.success">Архив RCF успешно распакован!</string>
+        <string key="message.rcf.unpack.failed">Не удалось распаковать RCF-архив: {0}</string>
+        <string key="message.rcf.pack.success">Архив RCF успешно собран!</string>
+        <string key="message.rcf.pack.failed">Не удалось собрать RCF-архив: {0}</string>
+        <string key="caption.export.rawChunk">Экспорт сырого чанка</string>
+        <string key="message.rawChunk.containerParseFailed">Не удалось разобрать P3D внутри RCF.</string>
+        <string key="message.rawChunk.invalidSection">Выбранный элемент не является внутренней P3D-секцией.</string>
+        <string key="viewer.animation.none">(нет анимации)</string>
+        <string key="viewer.animation.framesSuffix"> кадров</string>
+        <string key="viewer.animation.unnamed">без имени</string>
+        <string key="viewer.animation.framePlaceholder">кадр —</string>
+        <string key="viewer.animation.frameValue">кадр {0}/{1}</string>
+        <string key="viewer.texture.auto">Автовыбор текстуры</string>
+        <string key="viewer.tooltip.shading">Режим отображения модели</string>
+        <string key="viewer.tooltip.flipUv">По умолчанию включено: UVCoordinate уже инвертирует V при чтении P3D. Повторная инверсия здесь восстанавливает исходную ориентацию UV для WPF. Снимите отметку, чтобы посмотреть альтернативную ориентацию.</string>
+        <string key="viewer.tooltip.textureOverride">Выбрать текстуру вручную для этой модели</string>
+        <string key="viewer.tooltip.animation">Выбрать анимацию из текущего P3D</string>
+        <string key="viewer.tooltip.play">Воспроизвести / приостановить анимацию</string>
+        <string key="viewer.tooltip.loop">Зациклить анимацию</string>
+        <string key="viewer.tooltip.frame">Текущий кадр анимации</string>
+        <string key="viewer.shading.tooltip.currentPrefix">Текущий режим — </string>
+        <string key="viewer.shading.tooltip.switchPrefix">Переключить на режим — </string>
+        <string key="viewer.shading.skinningTooltipSuffix">. Цвет показывает преобладающее влияние костей.</string>
+        <string key="viewer.shading.active">Активный режим отображения</string>
+        <string key="viewer.shading.inactive">Неактивный режим отображения</string>
+        <string key="viewer.stats.animation">Анимация: {0} | костей с каналами: {1} | кадры: {2} | каналы: {3}/{4}{5}</string>
+        <string key="viewer.stats.animationWarningCountSuffix"> | предупреждений: {0}</string>
+        <string key="viewer.stats.animationNoChannels"> | нет распознанных кадровых каналов: проверьте тип анимации/структуру скелета</string>
+        <string key="viewer.stats.animationNoDecodedFrames"> | каналы не содержат декодированных кадров</string>
+        <string key="viewer.stats.animationNoChannelsInNodes"> | в узлах анимации нет AnimationChannel/BoneROT/BoneTRAN</string>
+        <string key="viewer.stats.animationCloneError">Не удалось подготовить копию анимации для просмотра: {0}</string>
+        <string key="viewer.stats.animationCloneFailed">Не удалось подготовить копию анимации для просмотра.</string>
+        <string key="viewer.stats.animationPreviewFailed">Не удалось загрузить предпросмотр анимации.</string>
+        <string key="viewer.stats.geometryError">Ошибка: {0}</string>
+        <string key="viewer.stats.geometryEmpty">В этом узле нет 3D геометрии</string>
+        <string key="viewer.stats.geometry">Вершин: {0:N0} | Полигонов: {1:N0}</string>
+        <string key="viewer.stats.geometryMissingSkinning"> | Скиннинг: нет весов для части мешей</string>
+        <string key="viewer.stats.skeletonEmpty">Скелет пуст: SkeletonJoint не найдены.</string>
+        <string key="viewer.stats.skeleton">🦴 Скелет: {0} суставов | {1} костей</string>
+        <string key="viewer.error.animationSkeletonNotFound">Не найден подходящий скелет для анимации '{0}'. Выберите CompositeDrawable нужной модели, затем выберите анимацию.</string>
+        <string key="viewer.error.animationSkeletonJointsMissing">Скелет '{0}' не содержит распознанных SkeletonJoint. Текущий просмотр оставлен без изменений.</string>
+        <string key="viewer.error.animationSkeletonMissing">Для этой анимации не найден подходящий Skeleton/SkeletonJoint.</string>
+        <string key="viewer.error.animationSkeletonBuildFailed">Не удалось построить скелет для выбранной анимации. Текущий просмотр оставлен без изменений.</string>
+        <string key="undo.description.addFilesRcfPrefix">Добавление файлов в RCF</string>
+        <string key="undo.description.addSectionsPrefix">Добавление секций в </string>
+        <string key="undo.description.importRawChunkPrefix">Импорт сырого чанка </string>
+        <string key="undo.description.replaceEntryPrefix">Замена записи </string>
+        <string key="undo.description.importResourcePrefix">Импорт ресурса </string>
+        <string key="undo.description.changePrefix">Изменение: </string>
+        <string key="cmd.file.add.tooltip">Добавить файлы в открытый RCF или P3D</string>
+        <string key="cmd.view.theme.tooltip">Переключить светлую/тёмную тему</string>
+        <string key="cmd.toolbar.open.tooltip">Открыть файл (Ctrl+O)</string>
+        <string key="cmd.toolbar.save.tooltip">Сохранить текущий документ (Ctrl+S)</string>
+        <string key="cmd.toolbar.exportSelected.tooltip">Экспортировать выбранный ресурс или группу ресурсов</string>
+        <string key="cmd.toolbar.unpackRcf.tooltip">Распаковать RCF-архив в папку</string>
+        <string key="cmd.search.clear.tooltip">Очистить поиск</string>
+        <string key="viewer.animation.displayModeMesh">Меш</string>
+        <string key="viewer.animation.displayModeSkeleton">Скелет</string>
+        <string key="viewer.animation.displayMode.tooltip">Переключить между деформируемым мешем и скелетом</string>
+        <string key="viewer.animation.noCompatiblePlaceholder">Нет совместимых анимаций</string>
+        <string key="viewer.animation.noCompatibleForComposite">Нет совместимых скелетных анимаций для модели «{0}» (скелет: «{1}»).</string>
+        <string key="viewer.animation.noCompatibleInP3D">В текущем P3D не найдено анимаций с каналами, совместимыми с доступными скелетами.</string>
+        <string key="viewer.animation.noSkinnedMeshPlaceholder">Нет деформируемого меша</string>
+        <string key="viewer.animation.noSkinnedMeshForComposite">Модель «{0}» не содержит пригодных весов или привязок к костям. Просмотр анимированного меша недоступен.</string>
+        <string key="viewer.animation.showIncompatible">Показывать несовместимые</string>
+        <string key="viewer.animation.showIncompatible.tooltip">Показывать также клипы, которые не удалось однозначно сопоставить со скелетом. При выборе программа попробует применить подходящие каналы.</string>
+        <string key="viewer.animation.incompatibleMarker"> [несовместима]</string>
+        <string key="viewer.animation.sourceSeparator"> — источник: </string>
+        <string key="viewer.animation.incompatible.tooltip">Совместимость не подтверждена. При выборе программа попробует применить доступные костные каналы.</string>
+        <string key="viewer.animation.noAnimationsPlaceholder">Анимации не найдены в доступных P3D-контейнерах</string>
+        <string key="viewer.animation.multiCompositeRigMismatch">Выбранные модели используют разные скелеты</string>
+        <string key="viewer.animation.multiCompositeRigMismatch.tooltip">Для совместной анимации выберите CompositeDrawable с одинаковым SkeletonName. Статическое отображение всех выбранных моделей доступно.</string>
+        <string key="viewer.stats.compositeBatchCount"> | CompositeDrawable: {0}</string>
+        <string key="viewer.animation.searching">Поиск анимаций…</string>
+        <string key="viewer.animation.searching.tooltip">Индексация доступных P3D-контейнеров выполняется в фоне. Найденные анимации появятся автоматически.</string>
+    </strings>
+</language>

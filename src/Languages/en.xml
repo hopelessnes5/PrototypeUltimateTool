@@ -1,0 +1,416 @@
+﻿<?xml version='1.0' encoding='utf-8'?>
+<language code="en" displayName="English" nativeName="English" culture="en-US">
+    <strings>
+        <string key="menu.file">File</string>
+        <string key="menu.edit">Edit</string>
+        <string key="menu.view">View</string>
+        <string key="menu.help">Help</string>
+        <string key="cmd.file.new">New</string>
+        <string key="cmd.file.new.p3d">Uncompressed Pure3D (.p3d)</string>
+        <string key="cmd.file.new.p3d.rz">RZ-compressed Pure3D (.p3d.rz)</string>
+        <string key="cmd.file.new.rcf">RCF Archive (.rcf)</string>
+        <string key="cmd.file.open">Open...</string>
+        <string key="cmd.file.recent">Recent Files</string>
+        <string key="cmd.file.add">Add Files to Current Document...</string>
+        <string key="cmd.file.save">Save File / Archive</string>
+        <string key="cmd.file.saveAs">Save File / Archive As...</string>
+        <string key="cmd.file.exportTextures">📁 Export All Textures...</string>
+        <string key="cmd.file.dumpP3D">📦 Dump Entire P3D...</string>
+        <string key="cmd.file.exportRawChunks">Export Raw P3D Chunks for Selected Items...</string>
+        <string key="cmd.file.unpackRcf">📂 Unpack RCF Archive to Folder...</string>
+        <string key="cmd.file.packRcf">📦 Pack Folder into RCF Archive...</string>
+        <string key="cmd.file.exit">Exit</string>
+        <string key="cmd.edit.undo">Undo</string>
+        <string key="cmd.edit.redo">Redo</string>
+        <string key="cmd.view.theme">Dark Theme</string>
+        <string key="cmd.view.flipV">Flip Texture V</string>
+        <string key="cmd.view.sceneStats">Show 3D Statistics</string>
+        <string key="menu.view.language">Language</string>
+        <string key="cmd.view.resetSplitters">Reset Splitter Proportions (1/3 to 2/3)</string>
+        <string key="cmd.view.expandTree">Expand Tree</string>
+        <string key="cmd.view.collapseTree">Collapse Tree</string>
+        <string key="cmd.help.log">Event Log...</string>
+        <string key="cmd.help.explorerIntegration">Windows Explorer Integration...</string>
+        <string key="cmd.help.about">About</string>
+        <string key="cmd.toolbar.open">📂 Open</string>
+        <string key="cmd.toolbar.save">💾 Save</string>
+        <string key="cmd.toolbar.exportSelected">📤 Export Selected</string>
+        <string key="cmd.toolbar.unpackRcf">📦 Unpack RCF...</string>
+        <string key="cmd.search.clear">✕</string>
+        <string key="hint.search">Search by name...</string>
+        <string key="hint.search.clear">Clear search</string>
+        <string key="label.resourceType">Type:</string>
+        <string key="hint.resourceType">Filter by RCF file extension or P3D section type</string>
+        <string key="sort.default">Default</string>
+        <string key="sort.nameAsc">Name (A → Z)</string>
+        <string key="sort.nameDesc">Name (Z → A)</string>
+        <string key="sort.sizeDesc">Size (descending)</string>
+        <string key="sort.sizeAsc">Size (ascending)</string>
+        <string key="sort.resolutionDesc">Resolution (descending)</string>
+        <string key="sort.resolutionAsc">Resolution (ascending)</string>
+        <string key="sort.type">Type</string>
+        <string key="filter.allTypes">All Types</string>
+        <string key="filter.noExtension">(no extension)</string>
+        <string key="filter.p3dPrefix">P3D: </string>
+        <string key="context.open">Open</string>
+        <string key="context.openWith">Open With...</string>
+        <string key="context.exportSelected">📤 Export This Item...</string>
+        <string key="context.replace">📥 Replace Item Data...</string>
+        <string key="context.exportRawChunk">Export Raw P3D Chunk...</string>
+        <string key="context.importRawChunk">Import Raw P3D Chunk...</string>
+        <string key="cmd.toolbar.exportSelected.multiple">📤 Export Selected ({0})</string>
+        <string key="context.exportSelected.multiple">📤 Export Selected Items ({0})...</string>
+        <string key="context.exportRawChunk.multiple">Export Raw P3D Chunks for Selected Items ({0})...</string>
+        <string key="tree.tooltip.rcfPathPrefix">RCF path: </string>
+        <string key="tree.tooltip.depthPrefix">Depth: </string>
+        <string key="tree.tooltip.levelSuffix"> level</string>
+        <string key="tree.tooltip.p3dDepthPrefix">P3D depth: </string>
+        <string key="tree.tooltip.sourcePrefix">Source: </string>
+        <string key="tree.tooltip.containerPrefix">Container: </string>
+        <string key="tree.tooltip.pixelCountPrefix">Pixels: </string>
+        <string key="view.mode2d">🖼️ 2D Texture</string>
+        <string key="view.mode3d">🧊 3D Model</string>
+        <string key="label.preset">Preset:</string>
+        <string key="label.channels">Channels:</string>
+        <string key="channel.preset.rgba">RGBA</string>
+        <string key="channel.preset.rgb">RGB</string>
+        <string key="channel.red">R</string>
+        <string key="channel.green">G</string>
+        <string key="channel.blue">B</string>
+        <string key="channel.alpha">A</string>
+        <string key="dialog.log.close">Close</string>
+        <string key="dialog.log.refresh">Refresh</string>
+        <string key="dialog.log.copy">Copy</string>
+        <string key="dialog.log.openFile">Open Log File</string>
+        <string key="dialog.about.close">Close</string>
+        <string key="dialog.explorer.install">Install / Update Integration</string>
+        <string key="dialog.explorer.remove">Remove Integration</string>
+        <string key="dialog.explorer.defaults">Default Apps...</string>
+        <string key="viewer.resetCamera">🏠 Reset View</string>
+        <string key="viewer.shading.label">Shading:</string>
+        <string key="viewer.flipUv">🔄 Flip UV</string>
+        <string key="viewer.textureOverride">Automatic Texture Selection</string>
+        <string key="viewer.animation.label">Animation:</string>
+        <string key="viewer.animation.play">▶</string>
+        <string key="viewer.animation.loop">↻</string>
+        <string key="viewer.animation.frameLabel">Frame —</string>
+        <string key="viewer.shading.wireframe">Wireframe: vertices and edges</string>
+        <string key="viewer.shading.solid">Solid Model</string>
+        <string key="viewer.shading.textured">Textures</string>
+        <string key="viewer.shading.normals">Normal Visualization</string>
+        <string key="viewer.shading.skinning">Skinning / Bone Weights</string>
+        <string key="unit.byte">B</string>
+        <string key="unit.kilobyte">KB</string>
+        <string key="unit.megabyte">MB</string>
+        <string key="unit.unknownSize">unknown size</string>
+        <string key="dialog.about.repository">Open GitHub Repository</string>
+        <string key="dialog.about.discord">Join the Discord Community</string>
+        <string key="dialog.explorer.close">Close</string>
+        <string key="label.recent.empty">(empty)</string>
+        <string key="label.search">🔍</string>
+        <string key="dialog.about.window">About — Prototype Ultimate Tool</string>
+        <string key="dialog.about.appName">Prototype Ultimate Tool</string>
+        <string key="dialog.about.versionPrefix">Version</string>
+        <string key="dialog.about.versionUnknown">Version not specified</string>
+        <string key="dialog.about.description">A tool for viewing and editing Prototype resources: P3D, RZ, and RCF.
+View textures and models, work with chunk trees and archive contents.</string>
+        <string key="dialog.about.projectHeader">About the Project</string>
+        <string key="dialog.about.credits">Repository and mod maintenance: hopelessnes5.
+Based on EditP3D by Nixson. Materials from Elan-S/EditP3D and Gibbed.IO / Gibbed.Prototype were used when adapting formats and behavior.
+Information about third-party components and licenses is available in THIRD_PARTY_NOTICES.md.</string>
+        <string key="hint.sort">Sort tree items</string>
+        <string key="tree.loading">Loading...</string>
+        <string key="tree.loadingP3D">Loading P3D...</string>
+        <string key="dialog.log.window">Event Log — Prototype Ultimate Tool</string>
+        <string key="dialog.log.empty">The log is empty.</string>
+        <string key="dialog.log.readError">Could not read the log: {0}</string>
+        <string key="dialog.log.copyError">Could not copy the log: {0}</string>
+        <string key="dialog.log.openError">Could not open the log file: {0}</string>
+        <string key="dialog.log.caption">Event Log</string>
+        <string key="dialog.explorer.window">Windows Explorer Integration</string>
+        <string key="dialog.explorer.heading">Prototype Ultimate Tool in Windows Explorer</string>
+        <string key="dialog.explorer.description">Adds “Open in Prototype Ultimate Tool” to the context menu for .rcf, .p3d, and .rz files, and registers the app under Open with. Changes apply only to this user and do not require administrator rights.</string>
+        <string key="dialog.explorer.status.installed">Status: integration is registered for the current EXE location.</string>
+        <string key="dialog.explorer.status.notInstalled">Status: integration is not installed or the EXE path has changed.</string>
+        <string key="dialog.explorer.status.checkError">Could not check the integration status: {0}</string>
+        <string key="dialog.explorer.caption">Prototype Ultimate Tool</string>
+        <string key="dialog.explorer.errorCaption">Integration Error</string>
+        <string key="dialog.explorer.removeCaption">Remove Integration</string>
+        <string key="dialog.explorer.defaultsCaption">Windows Settings</string>
+        <string key="dialog.explorer.install.success">Explorer integration has been registered.
+
+Right-click a .rcf, .p3d, or .rz file and choose “Open in Prototype Ultimate Tool”. In Windows 11, this entry may be under “Show more options”.
+
+For double-click opening, choose the app separately in Windows Default apps settings.</string>
+        <string key="dialog.explorer.install.error">Could not register Explorer integration.
+
+{0}</string>
+        <string key="dialog.explorer.remove.confirm">Remove Prototype Ultimate Tool commands from the context menu and Open with list?
+
+Current default apps for files will not be changed.</string>
+        <string key="dialog.explorer.remove.success">Integration removed.</string>
+        <string key="dialog.explorer.remove.error">Could not remove integration.
+
+{0}</string>
+        <string key="dialog.explorer.defaults.error">Could not open the Windows Default apps settings.
+
+{0}</string>
+        <string key="dialog.import.rcf.title">Add files to the root of the open RCF archive</string>
+        <string key="filter.allFiles">All files (*.*)|*.*</string>
+        <string key="dialog.import.p3d.title">Add P3D files or raw P3D chunks</string>
+        <string key="filter.p3dSectionsAndRawChunks">Pure3D/raw chunks (*.p3d;*.rz;*.p3dchunk-*)|*.p3d;*.rz;*.p3dchunk-*|All files (*.*)|*.*</string>
+        <string key="dialog.file.open.title">Open Prototype File</string>
+        <string key="filter.openPrototype">Prototype formats (*.p3d;*.rz;*.rcf;*.p3dchunk-*)|*.p3d;*.rz;*.rcf;*.p3dchunk-*|Pure3D (*.p3d)|*.p3d|RCF archives (*.rcf)|*.rcf|All files (*.*)|*.*</string>
+        <string key="dialog.file.save.rcf.title">Save RCF Archive</string>
+        <string key="filter.saveRcf">RCF archives (*.rcf)|*.rcf|All files (*.*)|*.*</string>
+        <string key="dialog.file.save.p3d.title">Save Pure3D File</string>
+        <string key="filter.saveP3d">Uncompressed Pure3D (*.p3d)|*.p3d|RZ-compressed Pure3D (*.p3d.rz)|*.p3d.rz|RZ (*.rz)|*.rz|All files (*.*)|*.*</string>
+        <string key="dialog.export.textures.folderTitle">Select a folder for texture export</string>
+        <string key="dialog.export.archiveEntry.title">Export RCF Entry</string>
+        <string key="dialog.export.mesh.title">Export 3D Model</string>
+        <string key="filter.exportMesh">Wavefront 3D (.obj for Blender)|*.obj|Raw chunk {0}|*{0}|All files (*.*)|*.*</string>
+        <string key="dialog.export.resource.title">Export Resource</string>
+        <string key="filter.exportResourceOrRawChunk">Export resource ({0})|*{0}|Raw chunk ({1})|*{1}|All files (*.*)|*.*</string>
+        <string key="dialog.export.rawChunk.title">Export Raw P3D Chunk</string>
+        <string key="filter.exportRawChunk">Raw P3D chunk ({0})|*{0}|All files (*.*)|*.*</string>
+        <string key="dialog.export.selectedBatch.folderTitle">Select a folder to export {0} items</string>
+        <string key="dialog.export.rawBatch.folderTitle">Select a folder to export {0} raw P3D chunks</string>
+        <string key="dialog.import.rawChunk.title">Import Raw P3D Chunk</string>
+        <string key="filter.importRawChunk">Raw chunk of this type (*{0})|*{0}|P3D/RZ and all files (*.*)|*.*</string>
+        <string key="dialog.replace.archiveEntry.title">Replace RCF Entry Contents</string>
+        <string key="dialog.replace.resource.title">Select a File to Replace Data</string>
+        <string key="filter.replaceTexture">DDS textures (*.dds)|*.dds|All files (*.*)|*.*</string>
+        <string key="dialog.unpackRcf.source.title">Select an RCF Archive</string>
+        <string key="filter.rcfOnly">RCF archives (*.rcf)|*.rcf</string>
+        <string key="dialog.unpackRcf.folder.title">Select a folder to unpack the RCF archive into</string>
+        <string key="dialog.packRcf.folder.title">Select a folder to pack into an RCF archive</string>
+        <string key="dialog.packRcf.output.title">Save RCF Archive</string>
+        <string key="caption.import.addFiles">Add Files</string>
+        <string key="caption.import.rcf">Add Files to RCF</string>
+        <string key="caption.import.p3d">Add to P3D</string>
+        <string key="caption.import.error">Import Error</string>
+        <string key="caption.import.rawChunk">Raw Chunk Import</string>
+        <string key="caption.import">Import</string>
+        <string key="caption.export">Export</string>
+        <string key="caption.error">Error</string>
+        <string key="caption.export.selection">Export Selection</string>
+        <string key="caption.export.rawChunks">Raw P3D Chunk Export</string>
+        <string key="caption.rcf">RCF</string>
+        <string key="message.import.selectedRcf.failed">Could not open the selected RCF P3D entry.</string>
+        <string key="message.import.document.required">Create or open a P3D document or an RCF archive first.</string>
+        <string key="message.import.rcf.added">Added to RCF: {0}.</string>
+        <string key="message.import.rcf.skipped">Skipped (names already exist or are invalid): {0}.</string>
+        <string key="message.common.errorsCount">Errors: {0}.</string>
+        <string key="message.common.andMore">
+…and {0} more.</string>
+        <string key="message.import.p3d.noneAdded">Could not add P3D sections.
+{0}</string>
+        <string key="message.import.p3d.summary">Files processed successfully: {0} of {1}.
+Root P3D sections added: {2}.</string>
+        <string key="message.import.p3d.types">
+Types: {0}.</string>
+        <string key="message.import.p3d.errors">
+Errors: {0}. The full list was written to the log (Help → Event Log).
+
+{1}</string>
+        <string key="message.import.p3d.commitError">The import was parsed, but the sections could not be safely added to the document. Changes were rolled back as far as possible.
+
+{0}
+
+Details: Help → Event Log.</string>
+        <string key="message.export.textures.summary">Export finished!
+Textures saved successfully: {0}</string>
+        <string key="message.export.selectionRequired">Select one or more files/items in the tree on the left first.</string>
+        <string key="message.export.rcf.noData">The entry has no available data.</string>
+        <string key="message.export.rcf.parseFailed">Could not parse the P3D containing the selected item.</string>
+        <string key="message.export.p3d.dataMissing">Could not retrieve data for the selected P3D item.</string>
+        <string key="message.export.rawChunk.fileSuccess">Raw P3D chunk exported to file {0}</string>
+        <string key="message.export.mesh.success">3D model exported to .OBJ successfully!
+You can now open it in Blender.</string>
+        <string key="message.export.mesh.noPolygons">Could not extract polygons from this model.</string>
+        <string key="message.export.resource.success">Item exported successfully!</string>
+        <string key="message.export.rawChunk.success">Raw P3D chunk exported successfully!</string>
+        <string key="message.export.selection.summary">Selection export finished.
+Saved successfully: {0} of {1}.</string>
+        <string key="message.export.selection.errors">
+Errors: {0}.
+
+{1}</string>
+        <string key="message.export.rawChunk.fileSuccessShort">Raw chunk exported: {0}</string>
+        <string key="message.export.rawChunk.failed">Could not export chunk: {0}</string>
+        <string key="message.export.rawBatch.summary">Raw P3D chunk export finished.
+Successful: {0} of {1}.</string>
+        <string key="message.export.rawBatch.orderManifest">
+The original order of {0} root sections was saved to P3DChunkOrder.manifest.</string>
+        <string key="message.export.rawBatch.errors">
+Errors: {0}. Details: Help → Event Log.
+
+{1}</string>
+        <string key="message.import.rawChunk.success">Raw chunk imported. Save the document to write the changes.</string>
+        <string key="message.import.rawChunk.failed">Could not import raw chunk: {0}
+Details were written to the log: Help → Event Log.</string>
+        <string key="message.replace.singleItemOnly">Data replacement operates on one item. Select one file or an item that supports import.</string>
+        <string key="message.replace.archive.noData">No data block was found for this entry.</string>
+        <string key="message.replace.archive.success">The entry data was replaced in memory. Click Save to write the changes to the RCF.</string>
+        <string key="message.replace.archive.failed">Failed to replace the entry: {0}</string>
+        <string key="message.replace.importableRequired">Select an item that supports data replacement (for example, a texture).</string>
+        <string key="message.replace.rcf.success">The data was replaced inside the RCF in memory. Click Save to write the archive to disk.</string>
+        <string key="message.replace.p3d.success">Data replaced successfully! Remember to save the P3D file.</string>
+        <string key="message.replace.failed">Replacement failed: {0}</string>
+        <string key="caption.open.failed">Could not Open File</string>
+        <string key="caption.recentFiles">Recent Files</string>
+        <string key="caption.aboutLink">Prototype Ultimate Tool</string>
+        <string key="caption.save">Save</string>
+        <string key="caption.unsavedChanges">Unsaved Changes</string>
+        <string key="caption.undo">Undo</string>
+        <string key="caption.redo">Redo</string>
+        <string key="caption.external">External Files</string>
+        <string key="caption.textureSearch">Texture Search</string>
+        <string key="caption.dumpP3D">P3D Dump</string>
+        <string key="cmd.edit.undo.withDescription">Undo: {0}</string>
+        <string key="cmd.edit.redo.withDescription">Redo: {0}</string>
+        <string key="message.open.shellFileMissing">Windows passed a file path to the application, but the file was not found:
+
+{0}
+
+Check the file association and the quotes around the %1 parameter.</string>
+        <string key="message.open.shellError">Could not open the file from Windows Explorer:
+
+{0}</string>
+        <string key="message.open.rcfFailed">Could not open RCF: {0}</string>
+        <string key="message.open.fileFailed">Could not open file: {0}</string>
+        <string key="message.recent.fileMissing">The file no longer exists and was removed from Recent Files:
+{0}</string>
+        <string key="message.about.openLinkFailed">Could not open the link in a browser.
+
+{0}</string>
+        <string key="message.about.openDiscordFailed">Could not open the Discord link in a browser.
+
+{0}</string>
+        <string key="message.external.closeWarning">Files are open in external applications. Tracking their changes will stop when Prototype Ultimate Tool closes.
+
+Make sure external editors have finished saving. Close the application?</string>
+        <string key="message.document.unsavedOnExit">There are unsaved changes in the open document. Save before exiting?</string>
+        <string key="message.document.unsavedBeforeOpen">The current document has changes. Save them before opening another file?</string>
+        <string key="message.rcf.syncP3dFailed">Could not synchronize the P3D inside RCF: {0}</string>
+        <string key="message.undo.failed">Could not undo the change: {0}</string>
+        <string key="message.redo.failed">Could not redo the change: {0}</string>
+        <string key="message.save.rcf.success">RCF archive saved successfully.</string>
+        <string key="message.save.rcf.failed">Could not save RCF: {0}</string>
+        <string key="message.save.p3d.success">File saved successfully!</string>
+        <string key="message.save.p3d.failed">Could not save the file: {0}</string>
+        <string key="message.textureSearch.stalePath">Could not find the texture again at its saved path. Refresh the filter.</string>
+        <string key="dialog.dumpP3D.folderTitle">Where should the entire P3D contents be unpacked?</string>
+        <string key="status.dumpP3D.progress">Unpacking P3D...</string>
+        <string key="message.dumpP3D.textureError">Texture {0}: {1}</string>
+        <string key="message.dumpP3D.modelNoGroups">Model {0}: the exporter found no usable geometry groups.</string>
+        <string key="message.dumpP3D.modelError">Model {0}: {1}</string>
+        <string key="message.dumpP3D.sectionError">Section {0}: {1}</string>
+        <string key="message.dumpP3D.workerError">Background unpacking failed: {0}</string>
+        <string key="message.dumpP3D.summary">P3D dump finished!
+
+📁 Textures (DDS): {0}
+🧊 3D models (OBJ for Blender): {1}
+📦 Other nodes: {2}
+Errors/skipped: {3}</string>
+        <string key="message.dumpP3D.details">
+
+Details were written to Help → Event Log.
+
+{0}</string>
+        <string key="message.external.unsupportedSelection">The selected item cannot be opened in an external application.</string>
+        <string key="message.external.noReverseImport">The item was exported and opened in an external application, but its format does not support importing changes back. Changes to the external file will not be applied to the document.</string>
+        <string key="message.external.openFailed">Could not open the external file: {0}</string>
+        <string key="message.external.readWorkingCopyFailed">Could not read the working copy after several attempts: {0}
+The file was saved in the temporary folder; save it again in the external application.</string>
+        <string key="message.external.importFailed">Could not import the external file changes after several attempts: {0}
+The working copy was preserved. Check the file format and save it again.</string>
+        <string key="message.external.stopTrackingPrompt">Changes to files opened in external applications are currently being monitored.
+
+Opening another document will stop monitoring the current working copies. Make sure the latest changes have already been imported.
+
+Continue?</string>
+        <string key="message.external.selectOneFirst">Select a file or exportable item in the tree first.</string>
+        <string key="message.external.oneItemOnly">Opening an item in an external application supports one item at a time. Select one item.</string>
+        <string key="message.external.entryDataMissing">The selected entry has no data.</string>
+        <string key="message.external.textureContainerParseFailed">Could not parse the P3D containing the selected texture.</string>
+        <string key="message.external.itemContainerParseFailed">Could not parse the P3D containing the selected item.</string>
+        <string key="message.external.selectExportableNotFolder">Select a file or exportable item, not a folder.</string>
+        <string key="message.external.typeNotExportable">This section type cannot currently be exported to an external file.</string>
+        <string key="message.rcf.unpack.success">RCF archive unpacked successfully!</string>
+        <string key="message.rcf.unpack.failed">Could not unpack the RCF archive: {0}</string>
+        <string key="message.rcf.pack.success">RCF archive packed successfully!</string>
+        <string key="message.rcf.pack.failed">Could not pack the RCF archive: {0}</string>
+        <string key="caption.export.rawChunk">Raw P3D Chunk Export</string>
+        <string key="message.rawChunk.containerParseFailed">Could not parse the P3D inside the RCF archive.</string>
+        <string key="message.rawChunk.invalidSection">The selected item is not an internal P3D section.</string>
+        <string key="viewer.animation.none">(no animation)</string>
+        <string key="viewer.animation.framesSuffix"> frames</string>
+        <string key="viewer.animation.unnamed">unnamed</string>
+        <string key="viewer.animation.framePlaceholder">Frame —</string>
+        <string key="viewer.animation.frameValue">Frame {0}/{1}</string>
+        <string key="viewer.texture.auto">Automatic Texture Selection</string>
+        <string key="viewer.tooltip.shading">Model display mode</string>
+        <string key="viewer.tooltip.flipUv">Enabled by default: UVCoordinate already flips V when reading P3D. Flipping it again here restores the original UV orientation for WPF. Clear the checkbox to view the alternative orientation.</string>
+        <string key="viewer.tooltip.textureOverride">Manually choose a texture for this model</string>
+        <string key="viewer.tooltip.animation">Choose an animation from the current P3D</string>
+        <string key="viewer.tooltip.play">Play / pause animation</string>
+        <string key="viewer.tooltip.loop">Loop animation</string>
+        <string key="viewer.tooltip.frame">Current animation frame</string>
+        <string key="viewer.shading.tooltip.currentPrefix">Current mode — </string>
+        <string key="viewer.shading.tooltip.switchPrefix">Switch to mode — </string>
+        <string key="viewer.shading.skinningTooltipSuffix">. Colors show the dominant bone influence.</string>
+        <string key="viewer.shading.active">Active display mode</string>
+        <string key="viewer.shading.inactive">Inactive display mode</string>
+        <string key="viewer.stats.animation">Animation: {0} | bones with channels: {1} | frames: {2} | channels: {3}/{4}{5}</string>
+        <string key="viewer.stats.animationWarningCountSuffix"> | warnings: {0}</string>
+        <string key="viewer.stats.animationNoChannels"> | no recognized frame channels: check the animation type/skeleton structure</string>
+        <string key="viewer.stats.animationNoDecodedFrames"> | channels contain no decoded frames</string>
+        <string key="viewer.stats.animationNoChannelsInNodes"> | no AnimationChannel/BoneROT/BoneTRAN in animation nodes</string>
+        <string key="viewer.stats.animationCloneError">Could not prepare an animation copy for preview: {0}</string>
+        <string key="viewer.stats.animationCloneFailed">Could not prepare an animation copy for preview.</string>
+        <string key="viewer.stats.animationPreviewFailed">Could not load the animation preview.</string>
+        <string key="viewer.stats.geometryError">Error: {0}</string>
+        <string key="viewer.stats.geometryEmpty">This node has no 3D geometry</string>
+        <string key="viewer.stats.geometry">Vertices: {0:N0} | Polygons: {1:N0}</string>
+        <string key="viewer.stats.geometryMissingSkinning"> | Skinning: weights are missing for some meshes</string>
+        <string key="viewer.stats.skeletonEmpty">Skeleton is empty: no SkeletonJoint entries found.</string>
+        <string key="viewer.stats.skeleton">🦴 Skeleton: {0} joints | {1} bones</string>
+        <string key="viewer.error.animationSkeletonNotFound">No compatible skeleton was found for animation '{0}'. Select the corresponding model's CompositeDrawable, then choose the animation.</string>
+        <string key="viewer.error.animationSkeletonJointsMissing">Skeleton '{0}' contains no recognized SkeletonJoint entries. The current preview was left unchanged.</string>
+        <string key="viewer.error.animationSkeletonMissing">No compatible Skeleton/SkeletonJoint was found for this animation.</string>
+        <string key="viewer.error.animationSkeletonBuildFailed">Could not build a skeleton for the selected animation. The current preview was left unchanged.</string>
+        <string key="undo.description.addFilesRcfPrefix">Adding files to RCF</string>
+        <string key="undo.description.addSectionsPrefix">Adding sections to </string>
+        <string key="undo.description.importRawChunkPrefix">Import raw chunk </string>
+        <string key="undo.description.replaceEntryPrefix">Replacing entry </string>
+        <string key="undo.description.importResourcePrefix">Import resource </string>
+        <string key="undo.description.changePrefix">Change: </string>
+        <string key="cmd.file.add.tooltip">Add files to the open RCF or P3D</string>
+        <string key="cmd.view.theme.tooltip">Toggle light/dark theme</string>
+        <string key="cmd.toolbar.open.tooltip">Open file (Ctrl+O)</string>
+        <string key="cmd.toolbar.save.tooltip">Save current document (Ctrl+S)</string>
+        <string key="cmd.toolbar.exportSelected.tooltip">Export the selected resource or group of resources</string>
+        <string key="cmd.toolbar.unpackRcf.tooltip">Unpack RCF archive to a folder</string>
+        <string key="cmd.search.clear.tooltip">Clear search</string>
+        <string key="viewer.animation.displayModeMesh">Mesh</string>
+        <string key="viewer.animation.displayModeSkeleton">Skeleton</string>
+        <string key="viewer.animation.displayMode.tooltip">Switch between the deformed mesh and the skeleton</string>
+        <string key="viewer.animation.noCompatiblePlaceholder">No compatible animations</string>
+        <string key="viewer.animation.noCompatibleForComposite">No compatible skeletal animations for model “{0}” (skeleton: “{1}”).</string>
+        <string key="viewer.animation.noCompatibleInP3D">No animations with tracks compatible with the available skeletons were found in this P3D.</string>
+        <string key="viewer.animation.noSkinnedMeshPlaceholder">No deformable mesh</string>
+        <string key="viewer.animation.noSkinnedMeshForComposite">Model “{0}” has no usable vertex weights or rigid bone bindings. Animated mesh preview is unavailable.</string>
+        <string key="viewer.animation.showIncompatible">Show incompatible</string>
+        <string key="viewer.animation.showIncompatible.tooltip">Also show clips that could not be matched unambiguously to a skeleton. Selecting one will attempt to apply any matching channels.</string>
+        <string key="viewer.animation.incompatibleMarker"> [incompatible]</string>
+        <string key="viewer.animation.sourceSeparator"> — source: </string>
+        <string key="viewer.animation.incompatible.tooltip">Compatibility is unconfirmed. Selecting this clip will attempt to apply available skeletal channels.</string>
+        <string key="viewer.animation.noAnimationsPlaceholder">No animations found in available P3D containers</string>
+        <string key="viewer.animation.multiCompositeRigMismatch">Selected models use different skeletons</string>
+        <string key="viewer.animation.multiCompositeRigMismatch.tooltip">For joint animation, select CompositeDrawable items with the same SkeletonName. Static display of all selected models is available.</string>
+        <string key="viewer.stats.compositeBatchCount"> | CompositeDrawable: {0}</string>
+        <string key="viewer.animation.searching">Searching animations…</string>
+        <string key="viewer.animation.searching.tooltip">Available P3D containers are being indexed in the background. Discovered animations will appear automatically.</string>
+    </strings>
+</language>

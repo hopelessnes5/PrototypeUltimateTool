@@ -1,42 +1,143 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
+using System.Globalization;
+using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
+using System.Text;
+using System.Security.Cryptography;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using System.Threading;
 using System.Windows.Forms;
 using Gibbed.IO;
 using Gibbed.Prototype.FileFormats;
 using Gibbed.Prototype.FileFormats.Pure3D;
+using Gibbed.Prototype.FileFormats.Cement;
 using Nixson.Common;
+using PrototypeUltimateTool.Modules.ImportExport.Prototype1;
 
 namespace PrototypeUltimateTool
 {
     public class MainForm : Form
     {
         private Pure3DFile _file;
+        private CementFile _rcfFile;
+        private List<RcfArchiveItem> _rcfItems = new List<RcfArchiveItem>();
+        // Large embedded P3D/RZ resources are decompressed and parsed on worker threads.
+        // The Task is shared by selection and expansion so the same entry is never parsed twice.
+        private readonly Dictionary<RcfArchiveItem, Task<RcfEntryParseResult>> _rcfEntryParseTasks =
+            new Dictionary<RcfArchiveItem, Task<RcfEntryParseResult>>();
+        private RcfArchiveItem _activeRcfItem;
         private string _currentFilePath;
+        // RCF header/table parsing and sidecar-index loading run away from the WinForms UI thread.
+        // A generation token prevents a slow old request from replacing a newer document.
+        private CancellationTokenSource _rcfOpenCts;
+        private int _rcfOpenGeneration;
+        private string _pendingRcfOpenPath;
+        // RCF TreeView construction is prepared away from the UI thread and then attached
+        // in small UI batches so large archives do not monopolize the WinForms message loop.
+        private CancellationTokenSource _rcfTreeBuildCts;
+        private int _rcfTreeBuildGeneration;
+        private System.Windows.Forms.Timer _rcfTreeBuildTimer;
+        private RcfTreeBuildSession _activeRcfTreeBuildSession;
         private Bitmap _currentSourceBmp;
         private bool _flipY = true;
+        private bool _showDx12StatsOverlay = true;
         private bool _isDarkTheme = true;
+        private string _uiLanguage = "ru";
+        private bool _applyingUiLocalization;
         private bool _onlyTextures = false;
+        private string _archiveExtensionFilter = string.Empty;
+        private string _archiveP3DNodeTypeFilter = string.Empty;
+        private string _p3dNodeTypeFilter = string.Empty;
+        private HashSet<string> _rcfEmbeddedP3DRootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private CancellationTokenSource _rcfEmbeddedP3DTypeScanCts;
+        private int _rcfEmbeddedP3DTypeScanGeneration;
+        private CancellationTokenSource _rcfAnimationSourceScanCts;
+        private int _rcfAnimationSourceScanGeneration;
+        private CementFile _rcfAnimationSourceScanArchive;
+        private int _rcfAnimationCatalogGeneration;
+        private bool _rcfAnimationItemsScanComplete;
+        private bool _multiCompositePreviewActive;
+        private bool _loadingMultiCompositePreview;
+        private bool _updatingResourceTypeFilter;
+        // Track popup visibility explicitly: ToolStripComboBox.ComboBox.DroppedDown can briefly
+        // report false while the native list window is opening, especially during async RCF scans.
+        private bool _resourceTypeFilterDropDownOpen;
+        private bool _rcfTypeFilterRefreshPending;
+        private bool _rcfTypeFilterRefreshPendingResetMissing;
+        private bool _rcfTypeFilterTreeRefreshPending;
+        private bool _isApplyingUndoRedo;
+        private UndoRedoAction _executingUndoRedoAction;
+        private bool _rcfSmartExpansionPending;
+        private Dictionary<RcfArchiveItem, List<RcfTextureHitInfo>> _visibleRcfTextureHits = new Dictionary<RcfArchiveItem, List<RcfTextureHitInfo>>();
+        private Task _rcfTextureScanTask;
+        private CancellationTokenSource _rcfTextureScanCts;
+        private int _rcfTextureScanGeneration;
+        private bool _rcfHasUnsavedChanges;
+        private bool _fileHasUnsavedChanges;
+        private readonly List<ExternalOpenSession> _externalOpenSessions = new List<ExternalOpenSession>();
+        private readonly Stack<UndoRedoAction> _undoHistory = new Stack<UndoRedoAction>();
+        private readonly Stack<UndoRedoAction> _redoHistory = new Stack<UndoRedoAction>();
+        private readonly List<string> _recentFiles = new List<string>();
+        private string _suggestedNewP3DSaveName = "Untitled.p3d";
+        private static readonly uint RcfCatalogAnimationTypeId = new Animation().TypeId;
+        private static readonly uint RcfCatalogSkeletonTypeId = new Skeleton().TypeId;
+        private static readonly uint RcfCatalogAnimationDataTypeId = new AnimationData().TypeId;
+        private static readonly uint RcfCatalogAnimationBoneTypeId = new AnimationBone().TypeId;
+        private static readonly uint RcfCatalogBoneRotationTypeId = new BoneRotationData().TypeId;
+        private static readonly uint RcfCatalogBoneTranslationTypeId = new BoneTranslationData().TypeId;
 
         private List<NodeCacheItem> _cachedNodes = new List<NodeCacheItem>();
 
         private MenuStrip menuStrip;
-        private ToolStripMenuItem themeMenuItem;
         private ToolStrip mainToolStrip;
+        private ToolStripButton quickOpenButton;
+        private ToolStripButton quickSaveButton;
+        private ToolStripButton quickExportButton;
+        private ToolStripButton quickUnpackRcfButton;
         private ToolStrip filterToolStrip;
         private SplitContainer mainSplit;
         private SplitContainer rightSplit;
 
-        private TreeView nodeTreeView;
+        private MultiSelectTreeView nodeTreeView;
+        private ToolStripMenuItem themeMenuItem;
+        private ToolStripMenuItem flipYMenuItem;
+        private ToolStripMenuItem sceneStatsOverlayMenuItem;
+        private ToolStripMenuItem languageMenuItem;
+        private ToolStripMenuItem undoMenuItem;
+        private ToolStripMenuItem redoMenuItem;
+        private ToolStripMenuItem saveMenuItem;
+        private ToolStripMenuItem addFilesMenuItem;
+        private ToolStripMenuItem recentFilesMenuItem;
+        private ToolStripMenuItem fileMenuItem;
+        private ToolStripMenuItem createFileMenuItem;
+        private ToolStripMenuItem exportRawChunkMenuItem;
+        private ToolStripMenuItem exportRawChunksMenuItem;
+        private ToolStripMenuItem importRawChunkMenuItem;
+        private ToolStripMenuItem saveAsMenuItem;
+        private ToolStripMenuItem exportAllTexturesMenuItem;
+        private ToolStripMenuItem dumpAllP3DMenuItem;
         private ContextMenuStrip treeContextMenu;
+        private ToolStripMenuItem openExternalMenuItem;
+        private ToolStripMenuItem openWithExternalMenuItem;
+        private ToolStripMenuItem exportSelectedMenuItem;
+        private ToolStripMenuItem replaceSelectedMenuItem;
         private ToolStripTextBox searchTextBox;
         private ToolStripComboBox sortComboBox;
-        private ToolStripButton onlyTexturesButton;
+        // Keep the type filter inline as the same ToolStripComboBox control used by sorting.
+        // Hosting a standalone ComboBox caused ToolStrip overflow to display an extra popup layer.
+        private ToolStripComboBox resourceTypeFilterComboBox;
+
+        private const string AllResourceTypesLabel = "Все типы";
+        private const string RcfEmbeddedP3DTypePrefix = "P3D: ";
+        private const string NoExtensionFilterToken = "__NO_EXTENSION__";
+        private const string NoExtensionFilterLabel = "(без расширения)";
 
         private ToolStrip viewModeToolStrip;
         private ToolStripButton mode2DButton;
@@ -55,8 +156,40 @@ namespace PrototypeUltimateTool
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmFlush();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+
         [DllImport("uxtheme.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
         private static extern int SetWindowTheme(IntPtr hWnd, string pszSubAppName, string pszSubIdList);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        // Win32 COMBOBOXINFO gives access to the native list-window HWND, which owns the
+        // dropdown scrollbar. Owner-drawing ComboBox items does not theme that scrollbar.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeComboBoxInfo
+        {
+            public int Size;
+            public NativeRect ItemRect;
+            public NativeRect ButtonRect;
+            public int ButtonState;
+            public IntPtr ComboHandle;
+            public IntPtr ItemHandle;
+            public IntPtr ListHandle;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetComboBoxInfo(IntPtr hwndCombo, ref NativeComboBoxInfo info);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -64,8 +197,35 @@ namespace PrototypeUltimateTool
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
 
+        // Displays the native Windows "Open with" dialog for a single file.
+        // OAIF_EXEC asks the shell to launch the selected application when the user confirms.
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct OpenAsInfo
+        {
+            [MarshalAs(UnmanagedType.LPWStr)] public string FilePath;
+            [MarshalAs(UnmanagedType.LPWStr)] public string ClassName;
+            public int Flags;
+        }
+
+        private const int OAIF_ALLOW_REGISTRATION = 0x00000001;
+        private const int OAIF_EXEC = 0x00000004;
+        private const int HRESULT_CANCELLED = unchecked((int)0x800704C7);
+
+        [DllImport("shell32.dll", EntryPoint = "SHOpenWithDialog", CharSet = CharSet.Unicode, PreserveSig = true)]
+        private static extern int SHOpenWithDialog(IntPtr hwndParent, ref OpenAsInfo openAsInfo);
+
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        // Windows 11 DWM attributes: explicit non-client colors avoid waiting for a
+        // process restart before the caption/border picks up the active application theme.
+        private const int DWMWA_BORDER_COLOR = 34;
+        private const int DWMWA_CAPTION_COLOR = 35;
+        private const int DWMWA_TEXT_COLOR = 36;
+
+        private const int RDW_INVALIDATE = 0x0001;
+        private const int RDW_ERASE = 0x0004;
+        private const int RDW_ALLCHILDREN = 0x0080;
+        private const int RDW_FRAME = 0x0400;
 
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
@@ -73,6 +233,8 @@ namespace PrototypeUltimateTool
         private const uint SWP_FRAMECHANGED = 0x0020;
 
         private const int WM_SETREDRAW = 0x000B;
+        private const int WM_NCACTIVATE = 0x0086;
+        private const uint RDW_UPDATENOW = 0x0100;
 
         public MainForm(string startupFile = null)
         {
@@ -81,7 +243,9 @@ namespace PrototypeUltimateTool
             this.StartPosition = FormStartPosition.CenterScreen;
             this.AllowDrop = true;
 
+            UiLocalization.Initialize(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Languages"));
             this.LoadSettings();
+            this._uiLanguage = UiLocalization.NormalizeLanguageCode(this._uiLanguage);
             this.BuildUI();
 
             this.DragEnter += (s, e) => { if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
@@ -95,15 +259,75 @@ namespace PrototypeUltimateTool
             {
                 this.ResetSplitterProportions();
                 this.ApplyTheme(this._isDarkTheme);
+            };
 
-                // Автоматическое открытие файла при запуске через "Открыть с помощью"
-                if (!string.IsNullOrEmpty(startupFile) && File.Exists(startupFile))
+            // Open shell-associated files synchronously from Shown. The window and all controls
+            // are initialized at this point; no deferred BeginInvoke is needed, so the startup
+            // document cannot be silently skipped if the message loop is closing or re-entrant.
+            this.Shown += (s, e) =>
+            {
+                if (string.IsNullOrWhiteSpace(startupFile)) return;
+                try
                 {
-                    this.OpenFile(startupFile);
+                    if (!File.Exists(startupFile))
+                    {
+                        this.ShowLocalizedMessageBoxById(this, "message.open.shellFileMissing",
+                            "Windows передал программе путь к файлу, но файл не найден:\n\n{0}\n\nПроверьте ассоциацию файлов и кавычки вокруг параметра %1.",
+                            "caption.open.failed", "Не удалось открыть файл", MessageBoxButtons.OK, MessageBoxIcon.Warning, startupFile);
+                        return;
+                    }
+
+                    this.OpenFile(Path.GetFullPath(startupFile));
+                }
+                catch (Exception ex)
+                {
+                    this.ShowLocalizedMessageBoxById(this, "message.open.shellError",
+                        "Не удалось открыть файл из Проводника:\n\n{0}", "caption.open.failed", "Ошибка открытия",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error, ex.ToString());
                 }
             };
 
-            this.FormClosing += (s, e) => this.SaveSettings();
+            this.FormClosing += (s, e) =>
+            {
+                if (this._externalOpenSessions.Count > 0)
+                {
+                    DialogResult closeResult = this.ShowLocalizedMessageBoxByIdWithDefaultButton(this, "message.external.closeWarning",
+                        "Есть файлы, открытые во внешних программах. После закрытия Prototype Ultimate Tool отслеживание их изменений прекратится.\n\nУбедитесь, что внешние редакторы закончили сохранение. Закрыть программу?",
+                        "caption.external", "Внешние файлы", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                    if (closeResult != DialogResult.Yes)
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+                }
+
+                if (this._rcfHasUnsavedChanges || this._fileHasUnsavedChanges)
+                {
+                    DialogResult saveResult = this.ShowLocalizedMessageBoxByIdWithDefaultButton(this, "message.document.unsavedOnExit",
+                        "Есть несохранённые изменения в открытом документе. Сохранить перед выходом?",
+                        "caption.unsavedChanges", "Несохранённые изменения", MessageBoxButtons.YesNoCancel,
+                        MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
+                    if (saveResult == DialogResult.Cancel)
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+                    if (saveResult == DialogResult.Yes)
+                    {
+                        this.OnSaveFile(false);
+                        if (this._rcfHasUnsavedChanges || this._fileHasUnsavedChanges)
+                        {
+                            e.Cancel = true;
+                            return;
+                        }
+                    }
+                }
+
+                this.CancelPendingRcfTreeBuild();
+                this.StopExternalOpenSessions();
+                this.CancelPendingRcfEmbeddedP3DTypeScan();
+                this.SaveSettings();
+            };
         }
 
         private static string GetConfigPath() => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.ini");
@@ -113,8 +337,17 @@ namespace PrototypeUltimateTool
             try
             {
                 string path = GetConfigPath();
-                string content = string.Format("DarkTheme={0}\nFlipY={1}\nOnlyTextures={2}\n", this._isDarkTheme, this._flipY, this._onlyTextures);
-                File.WriteAllText(path, content);
+                var content = new StringBuilder();
+                content.AppendFormat("DarkTheme={0}\nUiLanguage={1}\nFlipY={2}\nOnlyTextures={3}\nArchiveExtensionFilter={4}\nArchiveP3DNodeTypeFilter={5}\nP3DNodeTypeFilter={6}\nShowDx12StatsOverlay={7}\n",
+                    this._isDarkTheme, this._uiLanguage, this._flipY, this._onlyTextures, this._archiveExtensionFilter ?? string.Empty,
+                    this._archiveP3DNodeTypeFilter ?? string.Empty, this._p3dNodeTypeFilter ?? string.Empty,
+                    this._showDx12StatsOverlay);
+                for (int i = 0; i < Math.Min(10, this._recentFiles.Count); i++)
+                {
+                    string encodedPath = Convert.ToBase64String(Encoding.UTF8.GetBytes(this._recentFiles[i]));
+                    content.Append("RecentFile").Append(i).Append('=').Append(encodedPath).Append('\n');
+                }
+                File.WriteAllText(path, content.ToString());
             }
             catch { }
         }
@@ -129,19 +362,815 @@ namespace PrototypeUltimateTool
                     string[] lines = File.ReadAllLines(path);
                     foreach (var line in lines)
                     {
-                        var parts = line.Split('=');
-                        if (parts.Length == 2)
+                        if (string.IsNullOrWhiteSpace(line)) continue;
+                        int equals = line.IndexOf('=');
+                        if (equals <= 0) continue;
+                        string key = line.Substring(0, equals).Trim();
+                        string val = line.Substring(equals + 1).Trim();
+                        if (key == "DarkTheme" && bool.TryParse(val, out bool dark)) this._isDarkTheme = dark;
+                        else if (key.Equals("UiLanguage", StringComparison.OrdinalIgnoreCase)) this._uiLanguage = UiLocalization.NormalizeLanguageCode(val);
+                        else if (key == "FlipY" && bool.TryParse(val, out bool flip)) this._flipY = flip;
+                        else if (key == "ShowDx12StatsOverlay" && bool.TryParse(val, out bool showStats)) this._showDx12StatsOverlay = showStats;
+                        else if (key == "OnlyTextures" && bool.TryParse(val, out bool ot)) this._onlyTextures = ot;
+                        else if (key == "ArchiveExtensionFilter") this._archiveExtensionFilter = val;
+                        else if (key == "ArchiveP3DNodeTypeFilter") this._archiveP3DNodeTypeFilter = val;
+                        else if (key == "P3DNodeTypeFilter") this._p3dNodeTypeFilter = val;
+                        else if (key.StartsWith("RecentFile", StringComparison.OrdinalIgnoreCase))
                         {
-                            string key = parts[0].Trim();
-                            string val = parts[1].Trim();
-                            if (key == "DarkTheme" && bool.TryParse(val, out bool dark)) this._isDarkTheme = dark;
-                            if (key == "FlipY" && bool.TryParse(val, out bool flip)) this._flipY = flip;
-                            if (key == "OnlyTextures" && bool.TryParse(val, out bool ot)) this._onlyTextures = ot;
+                            try
+                            {
+                                string recent = Encoding.UTF8.GetString(Convert.FromBase64String(val));
+                                if (!string.IsNullOrWhiteSpace(recent) && !_recentFiles.Any(existing => SamePath(existing, recent)))
+                                    _recentFiles.Add(recent);
+                            }
+                            catch { /* Ignore malformed or hand-edited recent entries. */ }
                         }
                     }
                 }
             }
             catch { }
+            // The old "Только текстуры" mode was replaced by a real resource-type filter.
+            // Ignore a persisted legacy value so the tree always starts in a valid type context.
+            this._onlyTextures = false;
+        }
+
+        private void AddRecentFile(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            string fullPath;
+            try { fullPath = Path.GetFullPath(path); }
+            catch { return; }
+            this._recentFiles.RemoveAll(existing => SamePath(existing, fullPath));
+            this._recentFiles.Insert(0, fullPath);
+            if (this._recentFiles.Count > 10) this._recentFiles.RemoveRange(10, this._recentFiles.Count - 10);
+            this.RefreshRecentFilesMenu();
+            this.SaveSettings();
+        }
+
+        private void RefreshRecentFilesMenu()
+        {
+            if (this.recentFilesMenuItem == null) return;
+            this.recentFilesMenuItem.DropDownItems.Clear();
+            if (this._recentFiles.Count == 0)
+            {
+                this.recentFilesMenuItem.DropDownItems.Add(new ToolStripMenuItem(UiLocalization.TranslateId("label.recent.empty", "(пока пусто)", this._uiLanguage)) { Name = "label.recent.empty", Enabled = false });
+                return;
+            }
+
+            foreach (string recentPath in this._recentFiles.ToArray())
+            {
+                string path = recentPath;
+                string fileName = Path.GetFileName(path);
+                string parent = Path.GetDirectoryName(path) ?? string.Empty;
+                string display = string.IsNullOrEmpty(parent) ? fileName : fileName + " — " + parent;
+                if (display.Length > 100) display = display.Substring(0, 97) + "…";
+                var item = new ToolStripMenuItem(display)
+                {
+                    Name = "recent.file." + this.recentFilesMenuItem.DropDownItems.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    Tag = path,
+                    ToolTipText = path,
+                    Enabled = File.Exists(path)
+                };
+                item.Click += (s, e) =>
+                {
+                    if (File.Exists(path)) this.OpenFile(path);
+                    else
+                    {
+                        this._recentFiles.RemoveAll(existing => SamePath(existing, path));
+                        this.RefreshRecentFilesMenu();
+                        this.SaveSettings();
+                        this.ShowLocalizedMessageBoxById(this, "message.recent.fileMissing",
+                            "Файл больше не существует и удалён из списка недавних:\n{0}",
+                            "caption.recentFiles", "Недавние файлы", MessageBoxButtons.OK, MessageBoxIcon.Information, path);
+                    }
+                };
+                this.recentFilesMenuItem.DropDownItems.Add(item);
+            }
+        }
+
+        private static void WriteApplicationLog(string category, string message, Exception exception = null)
+        {
+            ApplicationLog.Write(category, message, exception);
+        }
+
+        private void ShowApplicationLogDialog()
+        {
+            using (Form dialog = new Form { Name = "dialog.log.window" })
+            {
+                dialog.Text = "Журнал событий — Prototype Ultimate Tool";
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.Size = new Size(980, 640);
+                dialog.MinimumSize = new Size(720, 440);
+                dialog.BackColor = this._isDarkTheme ? Color.FromArgb(32, 32, 32) : SystemColors.Control;
+                dialog.ForeColor = this._isDarkTheme ? Color.Gainsboro : SystemColors.ControlText;
+                dialog.Font = new Font("Segoe UI", 9F);
+
+                var logText = new RichTextBox
+                {
+                    Name = "dialog.log.text",
+                    Dock = DockStyle.Fill,
+                    ReadOnly = true,
+                    WordWrap = false,
+                    DetectUrls = false,
+                    Font = new Font("Consolas", 9F),
+                    BackColor = this._isDarkTheme ? Color.FromArgb(22, 22, 22) : Color.White,
+                    ForeColor = this._isDarkTheme ? Color.Gainsboro : Color.Black,
+                    BorderStyle = BorderStyle.FixedSingle
+                };
+                var sessionStrip = new FlowLayoutPanel
+                {
+                    Name = "dialog.log.sessionStrip",
+                    Dock = DockStyle.Top,
+                    Height = 42,
+                    Padding = new Padding(8, 7, 8, 4),
+                    FlowDirection = FlowDirection.LeftToRight,
+                    WrapContents = false,
+                    BackColor = dialog.BackColor
+                };
+                var sessionLabel = new Label
+                {
+                    Name = "dialog.log.sessionLabel",
+                    Text = "Сессия запуска:",
+                    AutoSize = true,
+                    Margin = new Padding(0, 5, 8, 0),
+                    ForeColor = dialog.ForeColor
+                };
+                var sessionSelector = new ComboBox
+                {
+                    Name = "dialog.log.sessionSelector",
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Width = 470,
+                    Margin = new Padding(0, 0, 12, 0),
+                    IntegralHeight = false,
+                    MaxDropDownItems = 18
+                };
+                var loadInfo = new Label
+                {
+                    Name = "dialog.log.loadInfo",
+                    Text = "Показан хвост журнала (до 1 MiB / 4000 строк).",
+                    AutoSize = true,
+                    Margin = new Padding(0, 5, 0, 0),
+                    ForeColor = dialog.ForeColor
+                };
+                sessionStrip.Controls.Add(sessionLabel);
+                sessionStrip.Controls.Add(sessionSelector);
+                sessionStrip.Controls.Add(loadInfo);
+
+                var buttons = new FlowLayoutPanel
+                {
+                    Dock = DockStyle.Bottom,
+                    Height = 42,
+                    FlowDirection = FlowDirection.RightToLeft,
+                    Padding = new Padding(6),
+                    WrapContents = false,
+                    BackColor = dialog.BackColor
+                };
+                var close = new Button { Name = "dialog.log.close", Text = "Закрыть", AutoSize = true, DialogResult = DialogResult.Cancel };
+                var refresh = new Button { Name = "dialog.log.refresh", Text = "Обновить", AutoSize = true };
+                var copy = new Button { Name = "dialog.log.copy", Text = "Копировать видимое", AutoSize = true };
+                var openFile = new Button { Name = "dialog.log.openFile", Text = "Открыть полный файл", AutoSize = true };
+
+                Func<string> selectedPath = () =>
+                {
+                    var selected = sessionSelector.SelectedItem as ApplicationLogFile;
+                    return selected == null ? ApplicationLog.CurrentLogPath : selected.Path;
+                };
+                Action reload = () =>
+                {
+                    string path = selectedPath();
+                    logText.Text = ApplicationLog.ReadTail(path, 1024 * 1024, 4000);
+                    logText.SelectionStart = logText.TextLength;
+                    logText.ScrollToCaret();
+                    try
+                    {
+                        var info = new FileInfo(path);
+                        loadInfo.Text = info.Exists
+                            ? string.Format(CultureInfo.InvariantCulture, "Хвост до 1 MiB / 4000 строк · полный файл {0:0.##} MiB", info.Length / (1024.0 * 1024.0))
+                            : "Файл журнала ещё не создан.";
+                    }
+                    catch { loadInfo.Text = "Показан хвост журнала (до 1 MiB / 4000 строк)."; }
+                };
+                bool isRefreshingSessionChoices = false;
+                Action<string> refreshSessions = preferredPath =>
+                {
+                    List<ApplicationLogFile> files = ApplicationLog.GetAvailableLogFiles();
+                    isRefreshingSessionChoices = true;
+                    sessionSelector.BeginUpdate();
+                    try
+                    {
+                        sessionSelector.Items.Clear();
+                        foreach (ApplicationLogFile file in files) sessionSelector.Items.Add(file);
+                        int selectedIndex = -1;
+                        if (!string.IsNullOrEmpty(preferredPath))
+                        {
+                            for (int i = 0; i < sessionSelector.Items.Count; i++)
+                            {
+                                var item = sessionSelector.Items[i] as ApplicationLogFile;
+                                if (item != null && string.Equals(item.Path, preferredPath, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    selectedIndex = i;
+                                    break;
+                                }
+                            }
+                        }
+                        if (selectedIndex < 0 && sessionSelector.Items.Count > 0) selectedIndex = 0;
+                        sessionSelector.SelectedIndex = selectedIndex;
+                    }
+                    finally
+                    {
+                        sessionSelector.EndUpdate();
+                        isRefreshingSessionChoices = false;
+                    }
+                };
+                refresh.Click += (sender, args) =>
+                {
+                    string path = selectedPath();
+                    refreshSessions(path);
+                    reload();
+                };
+                copy.Click += (sender, args) =>
+                {
+                    try { Clipboard.SetText(logText.Text ?? string.Empty); }
+                    catch (Exception ex)
+                    {
+                        this.ShowLocalizedMessageBoxById(dialog, "dialog.log.copyError", "Не удалось скопировать журнал: {0}",
+                            "dialog.log.caption", "Журнал", MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+                    }
+                };
+                openFile.Click += (sender, args) =>
+                {
+                    string path = selectedPath();
+                    try
+                    {
+                        if (!File.Exists(path)) File.WriteAllText(path, string.Empty, new UTF8Encoding(false));
+                        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        this.ShowLocalizedMessageBoxById(dialog, "dialog.log.openError", "Не удалось открыть файл журнала: {0}",
+                            "dialog.log.caption", "Журнал", MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+                    }
+                };
+
+                buttons.Controls.Add(close);
+                buttons.Controls.Add(refresh);
+                buttons.Controls.Add(copy);
+                buttons.Controls.Add(openFile);
+                var content = new Panel { Dock = DockStyle.Fill };
+                content.Controls.Add(logText);
+                content.Controls.Add(sessionStrip);
+                content.Controls.Add(buttons);
+                dialog.Controls.Add(content);
+                dialog.CancelButton = close;
+                refreshSessions(ApplicationLog.CurrentLogPath);
+                reload();
+                sessionSelector.SelectedIndexChanged += (sender, args) =>
+                {
+                    if (!isRefreshingSessionChoices) reload();
+                };
+                UiLocalization.ApplyControlTree(dialog, this._uiLanguage);
+                dialog.ShowDialog(this);
+            }
+        }
+
+        private void ShowAboutDialog()
+        {
+            string versionValue = null;
+            try
+            {
+                var assembly = Assembly.GetExecutingAssembly();
+                var assemblyVersion = assembly.GetName().Version;
+                versionValue = assemblyVersion == null ? null : assemblyVersion.ToString(3);
+            }
+            catch
+            {
+                versionValue = null;
+            }
+
+            string language = this._uiLanguage;
+            string titleText = UiLocalization.TranslateId("dialog.about.window", "О программе — Prototype Ultimate Tool", language);
+            string versionText = string.IsNullOrWhiteSpace(versionValue)
+                ? UiLocalization.TranslateId("dialog.about.versionUnknown", "Версия не указана", language)
+                : UiLocalization.TranslateId("dialog.about.versionPrefix", "Версия", language) + " " + versionValue;
+
+            bool dark = this._isDarkTheme;
+            Color background = dark ? Color.FromArgb(30, 30, 30) : SystemColors.Control;
+            Color foreground = dark ? Color.FromArgb(230, 230, 230) : SystemColors.ControlText;
+            Color muted = dark ? Color.FromArgb(175, 175, 175) : SystemColors.GrayText;
+            Color accent = dark ? Color.FromArgb(86, 156, 214) : SystemColors.HotTrack;
+
+            using (var dialog = new Form())
+            {
+                dialog.Name = "dialog.about.window";
+                dialog.Text = titleText;
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.ClientSize = new Size(520, 380);
+                dialog.BackColor = background;
+                dialog.ForeColor = foreground;
+                dialog.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+                dialog.AutoScaleMode = AutoScaleMode.Font;
+
+                var title = new Label
+                {
+                    Name = "dialog.about.appName",
+                    Text = UiLocalization.TranslateId("dialog.about.appName", "Prototype Ultimate Tool", language),
+                    Font = new Font("Segoe UI Semibold", 16F, FontStyle.Bold, GraphicsUnit.Point),
+                    ForeColor = foreground,
+                    BackColor = Color.Transparent,
+                    AutoSize = false,
+                    Location = new Point(24, 20),
+                    Size = new Size(472, 34),
+                    TextAlign = ContentAlignment.MiddleLeft
+                };
+                var versionLabel = new Label
+                {
+                    Name = "dialog.about.versionValue",
+                    Text = versionText,
+                    ForeColor = muted,
+                    BackColor = Color.Transparent,
+                    AutoSize = true,
+                    Location = new Point(26, 60)
+                };
+                var description = new Label
+                {
+                    Name = "dialog.about.description",
+                    Text = UiLocalization.TranslateId("dialog.about.description", "Инструмент для просмотра и редактирования ресурсов Prototype: P3D, RZ и RCF.\r\nПросмотр текстур и моделей, работа с деревом чанков и содержимым архивов.", language),
+                    ForeColor = foreground,
+                    BackColor = Color.Transparent,
+                    AutoSize = false,
+                    Location = new Point(26, 91),
+                    Size = new Size(468, 52)
+                };
+                var attributionHeader = new Label
+                {
+                    Name = "dialog.about.projectHeader",
+                    Text = UiLocalization.TranslateId("dialog.about.projectHeader", "О проекте", language),
+                    Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+                    ForeColor = foreground,
+                    BackColor = Color.Transparent,
+                    AutoSize = true,
+                    Location = new Point(26, 157)
+                };
+                var attribution = new Label
+                {
+                    Name = "dialog.about.credits",
+                    Text = UiLocalization.TranslateId("dialog.about.credits", "Репозиторий и сопровождение модификаций: hopelessnes5.\r\nОснова: EditP3D от Nixson. При адаптации форматов и поведения использовались материалы Elan-S/EditP3D и Gibbed.IO / Gibbed.Prototype.\r\nСведения об исходных компонентах и лицензиях находятся в THIRD_PARTY_NOTICES.md.", language),
+                    ForeColor = muted,
+                    BackColor = Color.Transparent,
+                    AutoSize = false,
+                    Location = new Point(26, 180),
+                    Size = new Size(468, 70)
+                };
+                var repoLink = new LinkLabel
+                {
+                    Name = "dialog.about.repository",
+                    Text = UiLocalization.TranslateId("dialog.about.repository", "Открыть репозиторий на GitHub", language),
+                    LinkColor = accent,
+                    ActiveLinkColor = accent,
+                    VisitedLinkColor = accent,
+                    BackColor = Color.Transparent,
+                    AutoSize = true,
+                    Location = new Point(26, 254),
+                    LinkBehavior = LinkBehavior.HoverUnderline
+                };
+                repoLink.LinkClicked += (sender, args) =>
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo("https://github.com/hopelessnes5/PrototypeUltimateTool")
+                        {
+                            UseShellExecute = true
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        this.ShowLocalizedMessageBoxById(dialog, "message.about.openLinkFailed",
+                            "Не удалось открыть ссылку в браузере.\r\n\r\n{0}", "caption.aboutLink", "Prototype Ultimate Tool",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+                    }
+                };
+                var discordLink = new LinkLabel
+                {
+                    Name = "dialog.about.discord",
+                    Text = UiLocalization.TranslateId("dialog.about.discord", "Присоединиться к сообществу в Discord", language),
+                    LinkColor = accent,
+                    ActiveLinkColor = accent,
+                    VisitedLinkColor = accent,
+                    BackColor = Color.Transparent,
+                    AutoSize = true,
+                    Location = new Point(26, 282),
+                    LinkBehavior = LinkBehavior.HoverUnderline
+                };
+                discordLink.LinkClicked += (sender, args) =>
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo("https://discord.gg/XXNBqBSkNv")
+                        {
+                            UseShellExecute = true
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        this.ShowLocalizedMessageBoxById(dialog, "message.about.openDiscordFailed",
+                            "Не удалось открыть ссылку Discord в браузере.\r\n\r\n{0}", "caption.aboutLink", "Prototype Ultimate Tool",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+                    }
+                };
+                var closeButton = new Button
+                {
+                    Name = "dialog.about.close",
+                    Text = UiLocalization.TranslateId("dialog.about.close", "Закрыть", language),
+                    DialogResult = DialogResult.OK,
+                    Size = new Size(92, 30),
+                    Location = new Point(402, 335),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = dark ? Color.FromArgb(55, 55, 55) : SystemColors.Control,
+                    ForeColor = foreground,
+                    UseVisualStyleBackColor = false
+                };
+                closeButton.FlatAppearance.BorderColor = dark ? Color.FromArgb(75, 75, 75) : SystemColors.ControlDark;
+                dialog.AcceptButton = closeButton;
+                dialog.CancelButton = closeButton;
+                dialog.Controls.AddRange(new Control[] { title, versionLabel, description, attributionHeader, attribution, repoLink, discordLink, closeButton });
+                dialog.ShowDialog(this);
+            }
+        }
+
+        private void ShowExplorerIntegrationDialog()
+        {
+            bool dark = this._isDarkTheme;
+            Color background = dark ? Color.FromArgb(30, 30, 30) : SystemColors.Control;
+            Color foreground = dark ? Color.FromArgb(230, 230, 230) : SystemColors.ControlText;
+            Color muted = dark ? Color.FromArgb(180, 180, 180) : SystemColors.GrayText;
+            Color buttonBack = dark ? Color.FromArgb(55, 55, 55) : SystemColors.Control;
+
+            using (var dialog = new Form { Name = "dialog.explorer.window" })
+            {
+                dialog.Text = "Интеграция с Проводником Windows";
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.ClientSize = new Size(590, 300);
+                dialog.BackColor = background;
+                dialog.ForeColor = foreground;
+                dialog.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
+                dialog.AutoScaleMode = AutoScaleMode.Font;
+
+                var title = new Label
+                {
+                    Name = "dialog.explorer.heading",
+                    Text = "Prototype Ultimate Tool в Проводнике",
+                    Font = new Font("Segoe UI Semibold", 13F, FontStyle.Bold, GraphicsUnit.Point),
+                    ForeColor = foreground,
+                    BackColor = Color.Transparent,
+                    AutoSize = false,
+                    Location = new Point(20, 16),
+                    Size = new Size(550, 28)
+                };
+                var description = new Label
+                {
+                    Name = "dialog.explorer.description",
+                    Text = "Добавляет пункт «Открыть в Prototype Ultimate Tool» в контекстное меню файлов .rcf, .p3d и .rz, а также регистрирует приложение в списке «Открыть с помощью». Изменения выполняются только для текущего пользователя и не требуют прав администратора.",
+                    ForeColor = foreground,
+                    BackColor = Color.Transparent,
+                    AutoSize = false,
+                    Location = new Point(22, 54),
+                    Size = new Size(548, 67)
+                };
+                var status = new Label
+                {
+                    ForeColor = muted,
+                    BackColor = Color.Transparent,
+                    AutoSize = false,
+                    Location = new Point(22, 126),
+                    Size = new Size(548, 34)
+                };
+
+                Action refreshStatus = delegate
+                {
+                    try
+                    {
+                        bool installed = ExplorerIntegration.IsInstalled();
+                        status.Text = UiLocalization.TranslateId(
+                            installed ? "dialog.explorer.status.installed" : "dialog.explorer.status.notInstalled",
+                            installed
+                                ? "Состояние: интеграция зарегистрирована для текущего расположения EXE."
+                                : "Состояние: интеграция не установлена или путь к EXE изменился.", this._uiLanguage);
+                    }
+                    catch (Exception ex)
+                    {
+                        status.Text = this.FormatLocalizedText("dialog.explorer.status.checkError", "Не удалось проверить состояние: {0}", ex.Message);
+                    }
+                };
+
+                var installButton = new Button
+                {
+                    Name = "dialog.explorer.install",
+                    Text = "Добавить / обновить интеграцию",
+                    Location = new Point(22, 170),
+                    Size = new Size(235, 34),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = buttonBack,
+                    ForeColor = foreground,
+                    UseVisualStyleBackColor = false
+                };
+                installButton.FlatAppearance.BorderColor = dark ? Color.FromArgb(80, 80, 80) : SystemColors.ControlDark;
+                installButton.Click += (sender, args) =>
+                {
+                    try
+                    {
+                        ExplorerIntegration.Install();
+                        refreshStatus();
+                        this.ShowLocalizedMessageBoxById(dialog, "dialog.explorer.install.success",
+                            "Интеграция с Проводником зарегистрирована.\r\n\r\n" +
+                            "Щёлкни правой кнопкой по файлу .rcf, .p3d или .rz и выбери «Открыть в Prototype Ultimate Tool». " +
+                            "В Windows 11 этот пункт может находиться в меню «Показать дополнительные параметры».\r\n\r\n" +
+                            "Для открытия двойным щелчком выбери приложение отдельно в параметрах приложений по умолчанию Windows.",
+                            "dialog.explorer.caption", "Prototype Ultimate Tool", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        this.ShowLocalizedMessageBoxById(dialog, "dialog.explorer.install.error",
+                            "Не удалось зарегистрировать интеграцию с Проводником.\r\n\r\n{0}",
+                            "dialog.explorer.errorCaption", "Ошибка интеграции", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.ToString());
+                    }
+                };
+
+                var removeButton = new Button
+                {
+                    Name = "dialog.explorer.remove",
+                    Text = "Удалить интеграцию",
+                    Location = new Point(267, 170),
+                    Size = new Size(155, 34),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = buttonBack,
+                    ForeColor = foreground,
+                    UseVisualStyleBackColor = false
+                };
+                removeButton.FlatAppearance.BorderColor = dark ? Color.FromArgb(80, 80, 80) : SystemColors.ControlDark;
+                removeButton.Click += (sender, args) =>
+                {
+                    DialogResult answer = this.ShowLocalizedMessageBoxById(dialog, "dialog.explorer.remove.confirm",
+                        "Удалить команды Prototype Ultimate Tool из контекстного меню и списка «Открыть с помощью»?\r\n\r\n" +
+                        "Текущие приложения по умолчанию для файлов не будут изменены.",
+                        "dialog.explorer.removeCaption", "Удаление интеграции", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (answer != DialogResult.Yes) return;
+                    try
+                    {
+                        ExplorerIntegration.Remove();
+                        refreshStatus();
+                        this.ShowLocalizedMessageBoxById(dialog, "dialog.explorer.remove.success", "Интеграция удалена.",
+                            "dialog.explorer.caption", "Prototype Ultimate Tool", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        this.ShowLocalizedMessageBoxById(dialog, "dialog.explorer.remove.error",
+                            "Не удалось удалить интеграцию.\r\n\r\n{0}",
+                            "dialog.explorer.errorCaption", "Ошибка интеграции", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.ToString());
+                    }
+                };
+
+                var defaultsButton = new Button
+                {
+                    Name = "dialog.explorer.defaults",
+                    Text = "Приложения по умолчанию...",
+                    Location = new Point(22, 218),
+                    Size = new Size(235, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = buttonBack,
+                    ForeColor = foreground,
+                    UseVisualStyleBackColor = false
+                };
+                defaultsButton.FlatAppearance.BorderColor = dark ? Color.FromArgb(80, 80, 80) : SystemColors.ControlDark;
+                defaultsButton.Click += (sender, args) =>
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo("ms-settings:defaultapps") { UseShellExecute = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        this.ShowLocalizedMessageBoxById(dialog, "dialog.explorer.defaults.error",
+                            "Не удалось открыть параметры приложений по умолчанию.\r\n\r\n{0}",
+                            "dialog.explorer.defaultsCaption", "Параметры Windows", MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+                    }
+                };
+
+                var closeButton = new Button
+                {
+                    Name = "dialog.explorer.close",
+                    Text = "Закрыть",
+                    Location = new Point(478, 218),
+                    Size = new Size(92, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = buttonBack,
+                    ForeColor = foreground,
+                    UseVisualStyleBackColor = false,
+                    DialogResult = DialogResult.OK
+                };
+                closeButton.FlatAppearance.BorderColor = dark ? Color.FromArgb(80, 80, 80) : SystemColors.ControlDark;
+                dialog.AcceptButton = closeButton;
+                dialog.CancelButton = closeButton;
+                dialog.Controls.AddRange(new Control[] { title, description, status, installButton, removeButton, defaultsButton, closeButton });
+                UiLocalization.ApplyControlTree(dialog, this._uiLanguage);
+                refreshStatus();
+                dialog.ShowDialog(this);
+            }
+        }
+
+        private void SetUiLanguage(string language)
+        {
+            string normalized = UiLocalization.NormalizeLanguageCode(language);
+            if (this._uiLanguage == normalized) return;
+            this._uiLanguage = normalized;
+            this.UpdateLanguageMenuChecks();
+            this.SaveSettings();
+            if (this.IsDisposed) return;
+            if (this.IsHandleCreated)
+            {
+                try { this.BeginInvoke((System.Windows.Forms.MethodInvoker)delegate { if (!this.IsDisposed) this.ApplyLocalizationToUi(); }); }
+                catch (InvalidOperationException) { this.ApplyLocalizationToUi(); }
+            }
+            else this.ApplyLocalizationToUi();
+        }
+
+        private void ApplyLocalizationToUi()
+        {
+            if (this._applyingUiLocalization || this.IsDisposed) return;
+            this._applyingUiLocalization = true;
+            string languageCode = this._uiLanguage;
+            try
+            {
+                UiLocalization.ApplyControlTree(this, languageCode);
+                this.ApplyTreeNodeLocalization(this.nodeTreeView == null ? null : this.nodeTreeView.Nodes, languageCode);
+                if (this.treeContextMenu != null) UiLocalization.ApplyToolStripItems(this.treeContextMenu.Items, languageCode);
+
+                if (this.sortComboBox != null)
+                {
+                    int selectedIndex = this.sortComboBox.SelectedIndex;
+                    string[] sortFallbacks =
+                    {
+                        "По умолчанию", "По имени (А → Я)", "По имени (Я → А)",
+                        "По размеру (убыв.)", "По размеру (возр.)",
+                        "По разрешению (убыв.)", "По разрешению (возр.)", "По типу"
+                    };
+                    string[] sortKeys =
+                    {
+                        "sort.default", "sort.nameAsc", "sort.nameDesc", "sort.sizeDesc",
+                        "sort.sizeAsc", "sort.resolutionDesc", "sort.resolutionAsc", "sort.type"
+                    };
+                    this.sortComboBox.BeginUpdate();
+                    try
+                    {
+                        this.sortComboBox.Items.Clear();
+                        for (int i = 0; i < sortFallbacks.Length; i++)
+                            this.sortComboBox.Items.Add(UiLocalization.TranslateId(sortKeys[i], sortFallbacks[i], languageCode));
+                        this.sortComboBox.SelectedIndex = selectedIndex >= 0 && selectedIndex < sortFallbacks.Length ? selectedIndex : 0;
+                    }
+                    finally { this.sortComboBox.EndUpdate(); }
+                }
+
+                if (this.searchTextBox != null)
+                    this.searchTextBox.ToolTipText = UiLocalization.TranslateId("hint.search", "Поиск по названию...", languageCode);
+                if (this.searchTextBox != null && this.searchTextBox.TextBox != null)
+                    this.searchTextBox.TextBox.AccessibleName = UiLocalization.TranslateId("hint.search", "Поиск по названию...", languageCode);
+                if (this.sortComboBox != null)
+                    this.sortComboBox.ToolTipText = UiLocalization.TranslateId("hint.sort", "Сортировка элементов дерева", languageCode);
+                if (this.resourceTypeFilterComboBox != null)
+                {
+                    this.resourceTypeFilterComboBox.ToolTipText = UiLocalization.TranslateId("hint.resourceType", "Фильтр по расширению файла в RCF или по типу P3D-секции", languageCode);
+                    this.RefreshResourceTypeFilterOptions(false);
+                }
+                this.UpdateLanguageMenuChecks();
+            }
+            finally { this._applyingUiLocalization = false; }
+
+            // Selection-dependent labels can be regenerated after the tree is translated.
+            this.UpdateMainToolbarState();
+            this.UpdateTreeContextMenuState();
+            if (this.viewer3D != null) this.viewer3D.ApplyUiLanguage(languageCode);
+            this.SaveSettings();
+        }
+
+        private static string LocalizeTreeTooltip(string tooltip, object tag, string languageCode)
+        {
+            // Localize only known UI-owned lines for each node kind. Resource names, paths,
+            // and P3D type IDs are data and must not be changed by substring matching.
+            string[] lines = (tooltip ?? string.Empty).Split('\n');
+            if (tag is RcfFolderItem || tag is RcfArchiveItem)
+            {
+                if (lines.Length > 0)
+                    lines[0] = UiLocalization.TranslateIdPrefixInText(lines[0], "tree.tooltip.rcfPathPrefix", "Путь в RCF: ", languageCode);
+                if (lines.Length > 1)
+                {
+                    lines[1] = UiLocalization.TranslateIdPrefixInText(lines[1], "tree.tooltip.depthPrefix", "Глубина: ", languageCode);
+                    if (lines[1].StartsWith(UiLocalization.TranslateId("tree.tooltip.depthPrefix", "Глубина: ", languageCode), StringComparison.Ordinal))
+                        lines[1] = UiLocalization.TranslateIdSuffixInText(lines[1], "tree.tooltip.levelSuffix", " уровень", languageCode);
+                }
+
+                // Only RCF file tooltips have a format/size row; localize units after its bullet.
+                if (tag is RcfArchiveItem && lines.Length > 2)
+                {
+                    int sizeSeparator = lines[2].LastIndexOf(" • ", StringComparison.Ordinal);
+                    if (sizeSeparator >= 0)
+                    {
+                        string sizeText = lines[2].Substring(sizeSeparator + 3);
+                        // Replace longer unit symbols first (KB/MB contain the byte suffix B).
+                        sizeText = UiLocalization.TranslateIdSuffixInText(sizeText, "unit.megabyte", "МБ", languageCode);
+                        sizeText = UiLocalization.TranslateIdSuffixInText(sizeText, "unit.kilobyte", "КБ", languageCode);
+                        sizeText = UiLocalization.TranslateIdSuffixInText(sizeText, "unit.byte", "Б", languageCode);
+                        sizeText = UiLocalization.TranslateIdSuffixInText(sizeText, "unit.unknownSize", "размер неизвестен", languageCode);
+                        lines[2] = lines[2].Substring(0, sizeSeparator + 3) + sizeText;
+                    }
+                }
+            }
+            else if (tag is RcfTextureSearchHit)
+            {
+                if (lines.Length > 1)
+                    lines[1] = UiLocalization.TranslateIdPrefixInText(lines[1], "tree.tooltip.sourcePrefix", "Источник: ", languageCode);
+                if (lines.Length > 2)
+                    lines[2] = UiLocalization.TranslateIdPrefixInText(lines[2], "tree.tooltip.containerPrefix", "Контейнер: ", languageCode);
+                if (lines.Length > 3)
+                    lines[3] = UiLocalization.TranslateIdPrefixInText(lines[3], "tree.tooltip.pixelCountPrefix", "Пикселей: ", languageCode);
+            }
+            else if (tag is BaseNode && lines.Length > 2)
+            {
+                lines[2] = UiLocalization.TranslateIdPrefixInText(lines[2], "tree.tooltip.p3dDepthPrefix", "Глубина P3D: ", languageCode);
+            }
+            return string.Join("\n", lines);
+        }
+
+        private void ApplyTreeNodeLocalization(TreeNodeCollection nodes, string languageCode)
+        {
+            if (nodes == null) return;
+            foreach (TreeNode node in nodes)
+            {
+                // Resource names and paths are data. Only the transient loading labels and
+                // application-owned tooltip text are localized.
+                if (node.Tag == null)
+                {
+                    if (node.Text == "Загрузка..." || node.Text == "Loading...")
+                        node.Text = UiLocalization.TranslateId("tree.loading", "Загрузка...", languageCode);
+                    else if (node.Text == "Загрузка P3D..." || node.Text == "Loading P3D...")
+                        node.Text = UiLocalization.TranslateId("tree.loadingP3D", "Загрузка P3D...", languageCode);
+                    else if (node.Text == "Подготовка дерева ресурсов..." || node.Text == "Preparing resource tree...")
+                        node.Text = UiLocalization.TranslateId("tree.building", "Подготовка дерева ресурсов...", languageCode);
+                }
+                if (!string.IsNullOrEmpty(node.ToolTipText))
+                    node.ToolTipText = LocalizeTreeTooltip(node.ToolTipText, node.Tag, languageCode);
+                if (node.Nodes != null && node.Nodes.Count > 0)
+                    this.ApplyTreeNodeLocalization(node.Nodes, languageCode);
+            }
+        }
+
+        private string FormatLocalizedText(string textKey, string fallbackFormat, params object[] formatArguments)
+        {
+            string format = UiLocalization.TranslateId(textKey, fallbackFormat, this._uiLanguage);
+            if (formatArguments == null || formatArguments.Length == 0) return format;
+            try { return string.Format(CultureInfo.CurrentCulture, format, formatArguments); }
+            catch (FormatException)
+            {
+                // A hand-edited language catalog may have incorrect placeholders.
+                try { return string.Format(CultureInfo.CurrentCulture, fallbackFormat ?? string.Empty, formatArguments); }
+                catch (FormatException) { return format; }
+            }
+        }
+
+        private DialogResult ShowLocalizedMessageBoxById(IWin32Window owner, string textKey, string fallbackText,
+            string captionKey, string fallbackCaption, MessageBoxButtons buttons, MessageBoxIcon icon, params object[] formatArguments)
+        {
+            string text = this.FormatLocalizedText(textKey, fallbackText, formatArguments);
+            string caption = UiLocalization.TranslateId(captionKey, fallbackCaption, this._uiLanguage);
+            return owner != null
+                ? MessageBox.Show(owner, text, caption, buttons, icon)
+                : MessageBox.Show(text, caption, buttons, icon);
+        }
+
+        private DialogResult ShowLocalizedMessageBoxByIdWithDefaultButton(IWin32Window owner, string textKey, string fallbackText,
+            string captionKey, string fallbackCaption, MessageBoxButtons buttons, MessageBoxIcon icon,
+            MessageBoxDefaultButton defaultButton, params object[] formatArguments)
+        {
+            string text = this.FormatLocalizedText(textKey, fallbackText, formatArguments);
+            string caption = UiLocalization.TranslateId(captionKey, fallbackCaption, this._uiLanguage);
+            return owner != null
+                ? MessageBox.Show(owner, text, caption, buttons, icon, defaultButton)
+                : MessageBox.Show(text, caption, buttons, icon, defaultButton);
+        }
+
+        private DialogResult ShowLocalizedMessageBoxText(IWin32Window owner, string text,
+            string captionKey, string fallbackCaption, MessageBoxButtons buttons, MessageBoxIcon icon)
+        {
+            string caption = UiLocalization.TranslateId(captionKey, fallbackCaption, this._uiLanguage);
+            return owner != null
+                ? MessageBox.Show(owner, text ?? string.Empty, caption, buttons, icon)
+                : MessageBox.Show(text ?? string.Empty, caption, buttons, icon);
         }
 
         private void ResetSplitterProportions()
@@ -153,77 +1182,155 @@ namespace PrototypeUltimateTool
         private void BuildUI()
         {
             // Меню
-            this.menuStrip = new MenuStrip();
-            var fileMenu = new ToolStripMenuItem("Файл");
-            fileMenu.DropDownItems.Add("Открыть (.p3d, .rz, .rcf)...", null, (s, e) => this.OnOpenDialog());
-            fileMenu.DropDownItems.Add("Сохранить P3D", null, (s, e) => this.OnSaveFile(false));
-            fileMenu.DropDownItems.Add("Сохранить P3D как...", null, (s, e) => this.OnSaveFile(true));
+            this.menuStrip = new MenuStrip { Name = "toolbar.menu" };
+            this.fileMenuItem = new ToolStripMenuItem("Файл") { Name = "menu.file" };
+            var fileMenu = this.fileMenuItem;
+            this.createFileMenuItem = new ToolStripMenuItem("Создать") { Name = "cmd.file.new", ShortcutKeyDisplayString = "Ctrl+N" };
+            var createMenu = this.createFileMenuItem;
+            createMenu.DropDownItems.Add(new ToolStripMenuItem("Pure3D без сжатия (.p3d)", null, (s, e) => this.CreateNewP3DDocument("Untitled.p3d")) { Name = "cmd.file.new.p3d" });
+            createMenu.DropDownItems.Add(new ToolStripMenuItem("Pure3D с RZ-сжатием (.p3d.rz)", null, (s, e) => this.CreateNewP3DDocument("Untitled.p3d.rz")) { Name = "cmd.file.new.p3d.rz" });
+            createMenu.DropDownItems.Add(new ToolStripMenuItem("Архив RCF (.rcf)", null, (s, e) => this.CreateNewRcfDocument()) { Name = "cmd.file.new.rcf" });
+            fileMenu.DropDownItems.Add(createMenu);
+            fileMenu.DropDownItems.Add(new ToolStripMenuItem("Открыть...", null, (s, e) => this.OnOpenDialog())
+            { Name = "cmd.file.open", ShortcutKeys = Keys.Control | Keys.O });
+            this.recentFilesMenuItem = new ToolStripMenuItem("Недавние файлы") { Name = "cmd.file.recent" };
+            fileMenu.DropDownItems.Add(this.recentFilesMenuItem);
             fileMenu.DropDownItems.Add(new ToolStripSeparator());
-            fileMenu.DropDownItems.Add("📁 Экспорт всех текстур...", null, (s, e) => this.OnExportAllTextures());
-            fileMenu.DropDownItems.Add("📦 Распаковать весь P3D целиком (Dump)...", null, (s, e) => this.OnDumpWholeP3D());
+            this.addFilesMenuItem = new ToolStripMenuItem("Добавить файлы в текущий документ...")
+            { Name = "cmd.file.add", ShortcutKeyDisplayString = "Ctrl+A", ToolTipText = "Добавить файлы в открытый RCF или P3D" };
+            this.addFilesMenuItem.Click += (s, e) => this.OnAddFilesToCurrentDocument();
+            fileMenu.DropDownItems.Add(this.addFilesMenuItem);
             fileMenu.DropDownItems.Add(new ToolStripSeparator());
-            fileMenu.DropDownItems.Add("Выход", null, (s, e) => Application.Exit());
+            this.saveMenuItem = new ToolStripMenuItem("Сохранить файл / архив", null, (s, e) => this.OnSaveFile(false))
+            { Name = "cmd.file.save", ShortcutKeys = Keys.Control | Keys.S };
+            this.saveAsMenuItem = new ToolStripMenuItem("Сохранить файл / архив как...", null, (s, e) => this.OnSaveFile(true))
+            { Name = "cmd.file.saveAs", ShortcutKeys = Keys.Control | Keys.Shift | Keys.S };
+            fileMenu.DropDownItems.Add(this.saveMenuItem);
+            fileMenu.DropDownItems.Add(this.saveAsMenuItem);
+            fileMenu.DropDownItems.Add(new ToolStripSeparator());
+            this.exportAllTexturesMenuItem = new ToolStripMenuItem("📁 Экспорт всех текстур...", null, (s, e) => this.OnExportAllTextures()) { Name = "cmd.file.exportTextures" };
+            this.dumpAllP3DMenuItem = new ToolStripMenuItem("📦 Распаковать весь P3D целиком (Dump)...", null, (s, e) => this.OnDumpWholeP3D()) { Name = "cmd.file.dumpP3D" };
+            fileMenu.DropDownItems.Add(this.exportAllTexturesMenuItem);
+            fileMenu.DropDownItems.Add(this.dumpAllP3DMenuItem);
+            fileMenu.DropDownItems.Add(new ToolStripSeparator());
+            this.exportRawChunksMenuItem = new ToolStripMenuItem("Экспортировать сырые P3D-чанки выделенных элементов...", null, (s, e) => this.OnExportRawP3DChunk()) { Name = "cmd.file.exportRawChunks" };
+            fileMenu.DropDownItems.Add(this.exportRawChunksMenuItem);
+            fileMenu.DropDownItems.Add(new ToolStripSeparator());
+            fileMenu.DropDownItems.Add(new ToolStripMenuItem("📂 Распаковать RCF-архив в папку...", null, (s, e) => this.OnUnpackRcf()) { Name = "cmd.file.unpackRcf" });
+            fileMenu.DropDownItems.Add(new ToolStripMenuItem("📦 Собрать папку в RCF-архив...", null, (s, e) => this.OnPackRcf()) { Name = "cmd.file.packRcf" });
+            fileMenu.DropDownItems.Add(new ToolStripSeparator());
+            fileMenu.DropDownItems.Add(new ToolStripMenuItem("Выход", null, (s, e) => Application.Exit()) { Name = "cmd.file.exit" });
 
-            var rcfMenu = new ToolStripMenuItem("RCF Архивы");
-            rcfMenu.DropDownItems.Add("Распаковать .rcf архив в папку...", null, (s, e) => this.OnUnpackRcf());
-            rcfMenu.DropDownItems.Add("Собрать папку в .rcf архив...", null, (s, e) => this.OnPackRcf());
+            var editMenu = new ToolStripMenuItem("Правка") { Name = "menu.edit" };
+            this.undoMenuItem = new ToolStripMenuItem("Отменить", null, (s, e) => this.UndoLastChange())
+            { Name = "cmd.edit.undo", ShortcutKeys = Keys.Control | Keys.Z, Enabled = false };
+            this.redoMenuItem = new ToolStripMenuItem("Повторить", null, (s, e) => this.RedoLastChange())
+            { Name = "cmd.edit.redo", ShortcutKeys = Keys.Control | Keys.Shift | Keys.Z, Enabled = false };
+            editMenu.DropDownItems.Add(this.undoMenuItem);
+            editMenu.DropDownItems.Add(this.redoMenuItem);
 
-            var viewMenu = new ToolStripMenuItem("Вид");
-            this.themeMenuItem = new ToolStripMenuItem(this._isDarkTheme ? "🌙 Тёмная тема" : "☀️ Светлая тема", null, (s, e) =>
+            var viewMenu = new ToolStripMenuItem("Вид") { Name = "menu.view" };
+            this.themeMenuItem = new ToolStripMenuItem("Тёмная тема")
+            { Name = "cmd.view.theme", CheckOnClick = true, Checked = this._isDarkTheme, ToolTipText = "Переключить светлую/тёмную тему" };
+            this.themeMenuItem.Click += (s, e) =>
             {
-                this.BeginInvoke((MethodInvoker)delegate
+                bool useDarkTheme = this.themeMenuItem.Checked;
+                // Let the menu finish its close/paint cycle before applying the full palette.
+                if (!this.IsDisposed && this.IsHandleCreated)
                 {
-                    this.ApplyTheme(!this._isDarkTheme);
-                    this.SaveSettings();
-                });
-            })
-            { CheckOnClick = true, Checked = this._isDarkTheme };
-
+                    this.BeginInvoke((System.Windows.Forms.MethodInvoker)delegate
+                    {
+                        if (this.IsDisposed) return;
+                        this.ApplyTheme(useDarkTheme);
+                        this.SaveSettings();
+                    });
+                }
+            };
+            this.flipYMenuItem = new ToolStripMenuItem("Инвертировать V текстуры")
+            { Name = "cmd.view.flipV", CheckOnClick = true, Checked = this._flipY };
+            this.flipYMenuItem.Click += (s, e) =>
+            {
+                this._flipY = this.flipYMenuItem.Checked;
+                this.SaveSettings();
+                this.ReloadPreview();
+            };
             viewMenu.DropDownItems.Add(this.themeMenuItem);
+            viewMenu.DropDownItems.Add(this.flipYMenuItem);
+            this.sceneStatsOverlayMenuItem = new ToolStripMenuItem("Показывать статистику 3D")
+            {
+                Name = "cmd.view.sceneStats",
+                CheckOnClick = true,
+                Checked = this._showDx12StatsOverlay,
+                ToolTipText = "Показывать или скрывать плавающую статистику Direct3D 12"
+            };
+            this.sceneStatsOverlayMenuItem.CheckedChanged += (s, e) =>
+            {
+                this._showDx12StatsOverlay = this.sceneStatsOverlayMenuItem.Checked;
+                if (this.viewer3D != null && !this.viewer3D.IsDisposed)
+                    this.viewer3D.SceneStatsOverlayEnabled = this._showDx12StatsOverlay;
+                this.SaveSettings();
+            };
+            viewMenu.DropDownItems.Add(this.sceneStatsOverlayMenuItem);
+            this.languageMenuItem = new ToolStripMenuItem("Язык") { Name = "menu.view.language" };
+            viewMenu.DropDownItems.Add(this.languageMenuItem);
+            this.PopulateLanguageMenu();
             viewMenu.DropDownItems.Add(new ToolStripSeparator());
-            viewMenu.DropDownItems.Add("Сбросить пропорции (1/3 к 2/3)", null, (s, e) => this.ResetSplitterProportions());
-            viewMenu.DropDownItems.Add("Развернуть дерево", null, (s, e) => this.ExpandTreeSafely(true));
-            viewMenu.DropDownItems.Add("Свернуть дерево", null, (s, e) => this.ExpandTreeSafely(false));
+            viewMenu.DropDownItems.Add(new ToolStripMenuItem("Сбросить пропорции (1/3 к 2/3)", null, (s, e) => this.ResetSplitterProportions()) { Name = "cmd.view.resetSplitters" });
+            viewMenu.DropDownItems.Add(new ToolStripMenuItem("Развернуть дерево", null, (s, e) => this.ExpandTreeSafely(true)) { Name = "cmd.view.expandTree" });
+            viewMenu.DropDownItems.Add(new ToolStripMenuItem("Свернуть дерево", null, (s, e) => this.ExpandTreeSafely(false)) { Name = "cmd.view.collapseTree" });
 
-            this.menuStrip.Items.AddRange(new ToolStripItem[] { fileMenu, rcfMenu, viewMenu });
+            var helpMenu = new ToolStripMenuItem("Справка") { Name = "menu.help" };
+            helpMenu.DropDownItems.Add(new ToolStripMenuItem("Журнал событий...", null, (s, e) => this.ShowApplicationLogDialog()) { Name = "cmd.help.log" });
+            helpMenu.DropDownItems.Add(new ToolStripMenuItem("Интеграция с Проводником Windows...", null, (s, e) => this.ShowExplorerIntegrationDialog()) { Name = "cmd.help.explorerIntegration" });
+            helpMenu.DropDownItems.Add(new ToolStripSeparator());
+            helpMenu.DropDownItems.Add(new ToolStripMenuItem("О программе", null, (s, e) => this.ShowAboutDialog()) { Name = "cmd.help.about" });
+
+            this.menuStrip.Items.AddRange(new ToolStripItem[] { fileMenu, editMenu, viewMenu, helpMenu });
             this.MainMenuStrip = this.menuStrip;
+            this.RefreshRecentFilesMenu();
 
             var sharedRenderer = new ThemedToolStripRenderer(() => this._isDarkTheme);
             this.menuStrip.Renderer = sharedRenderer;
 
-            // Верхний тулбар
-            this.mainToolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Renderer = sharedRenderer };
-            var openBtn = new ToolStripButton("📂 Открыть", null, (s, e) => this.OnOpenDialog());
-            var saveBtn = new ToolStripButton("💾 Сохранить", null, (s, e) => this.OnSaveFile(false));
-            var exportAllTexBtn = new ToolStripButton("📁 Экспорт текстур", null, (s, e) => this.OnExportAllTextures());
-            exportAllTexBtn.Font = new Font(this.Font, FontStyle.Bold);
-            var dumpAllBtn = new ToolStripButton("📦 Распаковать весь P3D", null, (s, e) => this.OnDumpWholeP3D());
-            var exportSelBtn = new ToolStripButton("📤 Экспорт выделенного", null, (s, e) => this.OnExportSelected());
-            var importBtn = new ToolStripButton("📥 Заменить...", null, (s, e) => this.OnReplaceTexture());
-            var flipYBtn = new ToolStripButton("🔄 Отразить Y", null, (s, e) =>
+            // Быстрый доступ: только частые действия с документом и экспортом.
+            // Настройки интеграции и сведения о программе находятся в меню «Справка».
+            this.mainToolStrip = new ToolStrip { Name = "toolbar.quickAccess", GripStyle = ToolStripGripStyle.Hidden, Renderer = sharedRenderer };
+            this.quickOpenButton = new ToolStripButton("📂 Открыть", null, (s, e) => this.OnOpenDialog())
             {
-                this._flipY = !this._flipY;
-                ((ToolStripButton)s).Checked = this._flipY;
-                this.SaveSettings();
-                this.ReloadPreview();
-            })
-            { CheckOnClick = true, Checked = this._flipY };
-
+                Name = "cmd.toolbar.open",
+                ToolTipText = "Открыть файл (Ctrl+O)", DisplayStyle = ToolStripItemDisplayStyle.Text
+            };
+            this.quickSaveButton = new ToolStripButton("💾 Сохранить", null, (s, e) => this.OnSaveFile(false))
+            {
+                Name = "cmd.toolbar.save",
+                ToolTipText = "Сохранить текущий документ (Ctrl+S)", DisplayStyle = ToolStripItemDisplayStyle.Text
+            };
+            this.quickExportButton = new ToolStripButton("📤 Экспорт выделенного", null, (s, e) => this.OnExportSelected())
+            {
+                Name = "cmd.toolbar.exportSelected",
+                ToolTipText = "Экспортировать выбранный ресурс или группу ресурсов", DisplayStyle = ToolStripItemDisplayStyle.Text
+            };
+            this.quickUnpackRcfButton = new ToolStripButton("📦 Распаковать RCF...", null, (s, e) => this.OnUnpackRcf())
+            {
+                Name = "cmd.toolbar.unpackRcf",
+                ToolTipText = "Распаковать RCF-архив в папку", DisplayStyle = ToolStripItemDisplayStyle.Text
+            };
             this.mainToolStrip.Items.AddRange(new ToolStripItem[]
             {
-                openBtn, saveBtn, new ToolStripSeparator(),
-                exportAllTexBtn, dumpAllBtn, new ToolStripSeparator(),
-                exportSelBtn, importBtn, new ToolStripSeparator(),
-                flipYBtn
+                this.quickOpenButton, this.quickSaveButton,
+                new ToolStripSeparator(), this.quickExportButton,
+                new ToolStripSeparator(), this.quickUnpackRcfButton
             });
 
             // Тулбар поиска слева
-            this.filterToolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Renderer = sharedRenderer };
-            this.searchTextBox = new ToolStripTextBox { Size = new Size(110, 25), ToolTipText = "Поиск по названию..." };
+            this.filterToolStrip = new ToolStrip { Name = "toolbar.resourceBrowser", GripStyle = ToolStripGripStyle.Hidden, Renderer = sharedRenderer };
+            // Keep the entire filter row within the tree pane so the type ComboBox never moves
+            // into ToolStrip's overflow popup (which otherwise required two clicks to open).
+            this.searchTextBox = new ToolStripTextBox { Name = "input.search", Size = new Size(80, 25), ToolTipText = "Поиск по названию..." };
             this.searchTextBox.TextChanged += (s, e) => this.RefreshTree();
-            var clearSearchBtn = new ToolStripButton("✕", null, (s, e) => this.searchTextBox.Text = "") { ToolTipText = "Очистить поиск" };
+            var clearSearchBtn = new ToolStripButton("✕", null, (s, e) => this.searchTextBox.Text = "") { Name = "cmd.search.clear", ToolTipText = "Очистить поиск" };
 
-            this.sortComboBox = new ToolStripComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Size = new Size(130, 25) };
+            this.sortComboBox = new ToolStripComboBox { Name = "input.sort", DropDownStyle = ComboBoxStyle.DropDownList, Size = new Size(120, 25), Tag = "sort-options", ToolTipText = "Сортировка элементов дерева" };
             this.sortComboBox.Items.AddRange(new object[]
             {
                 "По умолчанию",
@@ -236,73 +1343,121 @@ namespace PrototypeUltimateTool
                 "По типу"
             });
             this.sortComboBox.SelectedIndex = 0;
-            this.sortComboBox.SelectedIndexChanged += (s, e) => this.RefreshTree();
+            this.sortComboBox.ComboBox.DrawMode = DrawMode.OwnerDrawFixed;
+            this.sortComboBox.ComboBox.DrawItem += this.DrawThemedComboBoxItem;
+            this.sortComboBox.SelectedIndexChanged += (s, e) => { if (!this._applyingUiLocalization) this.RefreshTree(); };
 
-            this.onlyTexturesButton = new ToolStripButton("🖼️ Только текстуры", null, (s, e) =>
+            // Use the same inline ToolStripComboBox implementation as the adjacent sort field.
+            // A separate ToolStripControlHost put the whole control in the ToolStrip overflow menu,
+            // so the user first had to open overflow and only then open the type dropdown.
+            this.resourceTypeFilterComboBox = new ToolStripComboBox
             {
-                this._onlyTextures = !this._onlyTextures;
-                this.onlyTexturesButton.Checked = this._onlyTextures;
-                this.SaveSettings();
-                this.RefreshTree();
-            })
-            { CheckOnClick = true, Checked = this._onlyTextures };
+                Name = "input.resourceType",
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Size = new Size(118, 25),
+                AutoSize = false,
+                ToolTipText = "Фильтр по расширению файла в RCF или по типу P3D-секции",
+                Tag = "resource-type-filter"
+            };
+            this.resourceTypeFilterComboBox.ComboBox.DrawMode = DrawMode.OwnerDrawFixed;
+            this.resourceTypeFilterComboBox.ComboBox.DrawItem += this.DrawThemedComboBoxItem;
+            this.resourceTypeFilterComboBox.ComboBox.SelectionChangeCommitted += (s, e) => this.OnResourceTypeFilterChanged();
+            this.resourceTypeFilterComboBox.ComboBox.IntegralHeight = false;
+            this.resourceTypeFilterComboBox.ComboBox.DropDownHeight = 420;
+            this.resourceTypeFilterComboBox.ComboBox.MaxDropDownItems = 24;
+            this.resourceTypeFilterComboBox.ComboBox.AutoCompleteMode = AutoCompleteMode.None;
+            this.resourceTypeFilterComboBox.ComboBox.DropDown += (s, e) => this.OnResourceTypeFilterDropDownOpened();
+            this.resourceTypeFilterComboBox.ComboBox.DropDownClosed += (s, e) => this.OnResourceTypeFilterDropDownClosed();
 
             this.filterToolStrip.Items.AddRange(new ToolStripItem[]
             {
-                new ToolStripLabel("🔍"), this.searchTextBox, clearSearchBtn,
-                new ToolStripSeparator(),
-                this.sortComboBox,
-                new ToolStripSeparator(),
-                this.onlyTexturesButton
+                new ToolStripLabel("🔍") { Name = "label.search" }, this.searchTextBox, clearSearchBtn,
+                new ToolStripSeparator(), this.sortComboBox,
+                new ToolStripSeparator(), new ToolStripLabel("Тип:") { Name = "label.resourceType" }, this.resourceTypeFilterComboBox
             });
+            this.RefreshResourceTypeFilterOptions(false);
 
-            // Контекстное меню дерева
-            this.treeContextMenu = new ContextMenuStrip();
-            this.treeContextMenu.Items.Add("📤 Экспортировать этот элемент...", null, (s, e) => this.OnExportSelected());
-            this.treeContextMenu.Items.Add("📥 Заменить данные элемента...", null, (s, e) => this.OnReplaceTexture());
+            // Контекстное меню дерева: открыть рабочую копию во внешнем приложении и
+            // автоматически импортировать изменения обратно, если выбранный тип это поддерживает.
+            this.treeContextMenu = new ContextMenuStrip { Name = "context.resources", Renderer = sharedRenderer };
+            this.openExternalMenuItem = new ToolStripMenuItem("Открыть", null, (s, e) => this.OpenSelectedExternally(false)) { Name = "context.open" };
+            this.openWithExternalMenuItem = new ToolStripMenuItem("Открыть с помощью...", null, (s, e) => this.OpenSelectedExternally(true)) { Name = "context.openWith" };
+            this.exportSelectedMenuItem = new ToolStripMenuItem("📤 Экспортировать этот элемент...", null, (s, e) => this.OnExportSelected()) { Name = "context.exportSelected" };
+            this.replaceSelectedMenuItem = new ToolStripMenuItem("📥 Заменить данные элемента...", null, (s, e) => this.OnReplaceTexture()) { Name = "context.replace" };
+            this.exportRawChunkMenuItem = new ToolStripMenuItem("Экспортировать сырой P3D-чанк...", null, (s, e) => this.OnExportRawP3DChunk()) { Name = "context.exportRawChunk" };
+            this.importRawChunkMenuItem = new ToolStripMenuItem("Импортировать сырой P3D-чанк...", null, (s, e) => this.OnImportRawP3DChunk()) { Name = "context.importRawChunk" };
+            this.treeContextMenu.Items.Add(this.openExternalMenuItem);
+            this.treeContextMenu.Items.Add(this.openWithExternalMenuItem);
+            this.treeContextMenu.Items.Add(new ToolStripSeparator());
+            this.treeContextMenu.Items.Add(this.exportSelectedMenuItem);
+            this.treeContextMenu.Items.Add(this.exportRawChunkMenuItem);
+            this.treeContextMenu.Items.Add(this.importRawChunkMenuItem);
+            this.treeContextMenu.Items.Add(this.replaceSelectedMenuItem);
+            this.treeContextMenu.Opening += (s, e) => this.UpdateTreeContextMenuState();
 
             // Дерево нод
-            this.nodeTreeView = new TreeView
+            this.nodeTreeView = new MultiSelectTreeView
             {
+                Name = "tree.resources",
                 Dock = DockStyle.Fill,
                 BorderStyle = BorderStyle.None,
                 HideSelection = false,
+                FullRowSelect = true,
+                HotTracking = true,
+                ShowNodeToolTips = true,
+                ShowLines = true,
+                ShowRootLines = true,
+                Indent = 18,
+                ItemHeight = 22,
+                Font = new Font("Segoe UI", 9.0f, FontStyle.Regular, GraphicsUnit.Point),
                 ContextMenuStrip = this.treeContextMenu
             };
             typeof(TreeView).InvokeMember("DoubleBuffered", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.SetProperty, null, this.nodeTreeView, new object[] { true });
 
-            this.nodeTreeView.AfterSelect += (s, e) => this.OnNodeSelected(e.Node != null ? e.Node.Tag as BaseNode : null);
-            this.nodeTreeView.BeforeExpand += (s, e) => this.OnNodeBeforeExpand(e.Node);
-
+            this.nodeTreeView.HandleCreated += (s, e) => this.ApplyTreeNativeTheme(this._isDarkTheme);
+            this.nodeTreeView.AfterSelect += (s, e) =>
+            {
+                IList<TreeNode> selectedNodes = this.nodeTreeView.SelectedNodes;
+                bool pendingCompositeGroup = selectedNodes.Count > 1 && selectedNodes.All(n => n != null && n.Tag is CompositeDrawable);
+                if (!pendingCompositeGroup && !this.nodeTreeView.IsSelectionGestureInProgress)
+                {
+                    this.OnTreeNodeSelected(e.Node);
+                    this.ReleaseInactiveRcfEntryData();
+                }
+                this.UpdateMainToolbarState();
+            };
+            this.nodeTreeView.SelectedNodesChanged += (s, e) => this.OnTreeSelectedNodesChanged();
+            this.nodeTreeView.BeforeExpand += (s, e) => this.OnTreeNodeBeforeExpand(e);
             // Переключатель 2D / 3D
-            this.viewModeToolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Renderer = sharedRenderer, Dock = DockStyle.Top };
-            this.mode2DButton = new ToolStripButton("🖼️ 2D Текстура", null, (s, e) => this.SwitchViewMode(false)) { Font = new Font(this.Font, FontStyle.Bold), Checked = true };
-            this.mode3DButton = new ToolStripButton("🧊 3D Модель", null, (s, e) => this.SwitchViewMode(true)) { Font = new Font(this.Font, FontStyle.Bold) };
+            this.viewModeToolStrip = new ToolStrip { Name = "toolbar.viewMode", GripStyle = ToolStripGripStyle.Hidden, Renderer = sharedRenderer, Dock = DockStyle.Top };
+            this.mode2DButton = new ToolStripButton("🖼️ 2D Текстура", null, (s, e) => this.SwitchViewMode(false)) { Name = "view.mode2d", Font = new Font(this.Font, FontStyle.Bold), Checked = true };
+            this.mode3DButton = new ToolStripButton("🧊 3D Модель", null, (s, e) => this.SwitchViewMode(true)) { Name = "view.mode3d", Font = new Font(this.Font, FontStyle.Bold) };
 
             this.viewModeToolStrip.Items.AddRange(new ToolStripItem[] { this.mode2DButton, this.mode3DButton });
 
             // 2D Viewer
-            this.panel2D = new Panel { Dock = DockStyle.Fill };
-            this.channelToolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Renderer = sharedRenderer, Dock = DockStyle.Top };
-            var rgbaPreset = new ToolStripButton("RGBA", null, (s, e) => this.SetChannels(true, true, true, true)) { Font = new Font(this.Font, FontStyle.Bold) };
-            var rgbPreset = new ToolStripButton("RGB", null, (s, e) => this.SetChannels(true, true, true, false));
+            this.panel2D = new Panel { Name = "viewer.texture2d.panel", Dock = DockStyle.Fill };
+            this.channelToolStrip = new ToolStrip { Name = "toolbar.textureChannels", GripStyle = ToolStripGripStyle.Hidden, Renderer = sharedRenderer, Dock = DockStyle.Top };
+            var rgbaPreset = new ToolStripButton("RGBA", null, (s, e) => this.SetChannels(true, true, true, true)) { Name = "channel.preset.rgba", Font = new Font(this.Font, FontStyle.Bold) };
+            var rgbPreset = new ToolStripButton("RGB", null, (s, e) => this.SetChannels(true, true, true, false)) { Name = "channel.preset.rgb" };
 
-            this.rButton = new ToolStripButton("R", null, (s, e) => this.ApplyChannels()) { CheckOnClick = true, Checked = true, ForeColor = Color.IndianRed, Font = new Font(this.Font, FontStyle.Bold) };
-            this.gButton = new ToolStripButton("G", null, (s, e) => this.ApplyChannels()) { CheckOnClick = true, Checked = true, ForeColor = Color.LightGreen, Font = new Font(this.Font, FontStyle.Bold) };
-            this.bButton = new ToolStripButton("B", null, (s, e) => this.ApplyChannels()) { CheckOnClick = true, Checked = true, ForeColor = Color.DodgerBlue, Font = new Font(this.Font, FontStyle.Bold) };
-            this.aButton = new ToolStripButton("A", null, (s, e) => this.ApplyChannels()) { CheckOnClick = true, Checked = true, ForeColor = Color.LightGray, Font = new Font(this.Font, FontStyle.Bold) };
-            this.resolutionLabel = new ToolStripLabel { Alignment = ToolStripItemAlignment.Right };
+            this.rButton = new ToolStripButton("R", null, (s, e) => this.ApplyChannels()) { Name = "channel.red", CheckOnClick = true, Checked = true, ForeColor = Color.IndianRed, Font = new Font(this.Font, FontStyle.Bold) };
+            this.gButton = new ToolStripButton("G", null, (s, e) => this.ApplyChannels()) { Name = "channel.green", CheckOnClick = true, Checked = true, ForeColor = Color.LightGreen, Font = new Font(this.Font, FontStyle.Bold) };
+            this.bButton = new ToolStripButton("B", null, (s, e) => this.ApplyChannels()) { Name = "channel.blue", CheckOnClick = true, Checked = true, ForeColor = Color.DodgerBlue, Font = new Font(this.Font, FontStyle.Bold) };
+            this.aButton = new ToolStripButton("A", null, (s, e) => this.ApplyChannels()) { Name = "channel.alpha", CheckOnClick = true, Checked = true, ForeColor = Color.LightGray, Font = new Font(this.Font, FontStyle.Bold) };
+            this.resolutionLabel = new ToolStripLabel { Name = "label.textureResolution", Alignment = ToolStripItemAlignment.Right };
 
             this.channelToolStrip.Items.AddRange(new ToolStripItem[]
             {
-                new ToolStripLabel("Пресет:"), rgbaPreset, rgbPreset,
+                new ToolStripLabel("Пресет:") { Name = "label.preset" }, rgbaPreset, rgbPreset,
                 new ToolStripSeparator(),
-                new ToolStripLabel("Каналы:"), this.rButton, this.gButton, this.bButton, this.aButton,
+                new ToolStripLabel("Каналы:") { Name = "label.channels" }, this.rButton, this.gButton, this.bButton, this.aButton,
                 new ToolStripSeparator(), this.resolutionLabel
             });
 
             this.previewBox = new PictureBox
             {
+                Name = "preview.texture2d",
                 Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.Zoom,
                 BorderStyle = BorderStyle.Fixed3D
@@ -312,13 +1467,20 @@ namespace PrototypeUltimateTool
             this.panel2D.Controls.Add(this.channelToolStrip);
 
             // 3D Viewer
-            this.viewer3D = new Model3DViewer { Dock = DockStyle.Fill, Visible = false };
+            this.viewer3D = new Model3DViewer
+            {
+                Name = "viewer.model3d",
+                Dock = DockStyle.Fill,
+                Visible = false,
+                SceneStatsOverlayEnabled = this._showDx12StatsOverlay
+            };
 
             this.viewContainerPanel = new Panel { Dock = DockStyle.Fill };
             this.viewContainerPanel.Controls.Add(this.panel2D);
             this.viewContainerPanel.Controls.Add(this.viewer3D);
 
-            this.propGrid = new PropertyGrid { Dock = DockStyle.Fill, HelpVisible = false, ToolbarVisible = false };
+            this.propGrid = new PropertyGrid { Name = "properties.resource", Dock = DockStyle.Fill, HelpVisible = false, ToolbarVisible = false };
+            this.propGrid.PropertyValueChanged += (s, e) => this.OnPropertyGridValueChanged(e);
 
             var leftPanel = new Panel { Dock = DockStyle.Fill };
             leftPanel.Controls.Add(this.nodeTreeView);
@@ -354,6 +1516,42 @@ namespace PrototypeUltimateTool
             this.Controls.Add(this.mainSplit);
             this.Controls.Add(this.mainToolStrip);
             this.Controls.Add(this.menuStrip);
+            this.ApplyLocalizationToUi();
+            this.UpdateMainToolbarState();
+        }
+
+
+        private void PopulateLanguageMenu()
+        {
+            if (this.languageMenuItem == null) return;
+            this.languageMenuItem.DropDownItems.Clear();
+            foreach (UiLanguageOption language in UiLocalization.AvailableLanguages)
+            {
+                string code = language.Code;
+                var item = new ToolStripMenuItem(language.NativeName)
+                {
+                    Name = "language.option." + code,
+                    Tag = code,
+                    CheckOnClick = false,
+                    Checked = string.Equals(code, this._uiLanguage, StringComparison.OrdinalIgnoreCase)
+                };
+                item.Click += (sender, args) => this.SetUiLanguage(Convert.ToString(((ToolStripItem)sender).Tag));
+                this.languageMenuItem.DropDownItems.Add(item);
+            }
+            this.UpdateLanguageMenuChecks();
+        }
+
+        private void UpdateLanguageMenuChecks()
+        {
+            if (this.languageMenuItem == null) return;
+            foreach (ToolStripItem item in this.languageMenuItem.DropDownItems)
+            {
+                ToolStripMenuItem languageItem = item as ToolStripMenuItem;
+                if (languageItem == null) continue;
+
+                string code = Convert.ToString(languageItem.Tag);
+                languageItem.Checked = !string.IsNullOrEmpty(code) && string.Equals(code, this._uiLanguage, StringComparison.OrdinalIgnoreCase);
+            }
         }
 
         private void SwitchViewMode(bool is3D)
@@ -373,115 +1571,4579 @@ namespace PrototypeUltimateTool
             }
         }
 
-        private void ApplyTheme(bool isDark)
+        private void ApplyTreeNativeTheme(bool isDark)
         {
-            this._isDarkTheme = isDark;
-            this.themeMenuItem.Checked = isDark;
-            this.themeMenuItem.Text = isDark ? "🌙 Тёмная тема" : "☀️ Светлая тема";
+            if (this.nodeTreeView == null || !this.nodeTreeView.IsHandleCreated) return;
+            try
+            {
+                // DarkMode_Explorer styles the native TreeView scrollbar on supported
+                // Windows 10/11 builds. Explorer is the normal light-mode counterpart.
+                SetWindowTheme(this.nodeTreeView.Handle, isDark ? "DarkMode_Explorer" : "Explorer", null);
+                this.nodeTreeView.Invalidate();
+            }
+            catch { /* Native theme names vary across Windows versions. */ }
+        }
+
+        private static int ToColorRef(Color color)
+        {
+            // Win32 COLORREF is 0x00BBGGRR, unlike ARGB in System.Drawing.Color.ToArgb().
+            return color.R | (color.G << 8) | (color.B << 16);
+        }
+
+        private static void CollectControlsForTheme(Control parent, List<Control> result)
+        {
+            if (parent == null || parent.IsDisposed) return;
+            result.Add(parent);
+            foreach (Control child in parent.Controls)
+                CollectControlsForTheme(child, result);
+        }
+
+        private void DrawThemedComboBoxItem(object sender, DrawItemEventArgs e)
+        {
+            ComboBox combo = sender as ComboBox;
+            if (combo == null) return;
+
+            bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            Color background = selected
+                ? (this._isDarkTheme ? Color.FromArgb(62, 62, 64) : SystemColors.Highlight)
+                : (this._isDarkTheme ? Color.FromArgb(50, 50, 50) : SystemColors.Window);
+            Color foreground = selected && !this._isDarkTheme
+                ? SystemColors.HighlightText
+                : (this._isDarkTheme ? Color.FromArgb(225, 225, 225) : SystemColors.ControlText);
+
+            using (var brush = new SolidBrush(background)) e.Graphics.FillRectangle(brush, e.Bounds);
+            string text = e.Index >= 0 && e.Index < combo.Items.Count
+                ? combo.GetItemText(combo.Items[e.Index])
+                : combo.Text;
+            TextRenderer.DrawText(e.Graphics, text, combo.Font, e.Bounds, foreground,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            if ((e.State & DrawItemState.Focus) == DrawItemState.Focus)
+                ControlPaint.DrawFocusRectangle(e.Graphics, e.Bounds, foreground, background);
+        }
+
+        private void ScheduleResourceTypeDropdownTheme()
+        {
+            if (this.resourceTypeFilterComboBox == null || this.resourceTypeFilterComboBox.ComboBox == null) return;
+            try
+            {
+                if (this.IsHandleCreated && !this.IsDisposed)
+                    this.BeginInvoke((Action)(() => this.ApplyResourceTypeDropdownNativeTheme()));
+                else
+                    this.ApplyResourceTypeDropdownNativeTheme();
+            }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
+        }
+
+        private void ApplyResourceTypeDropdownNativeTheme()
+        {
+            ComboBox combo = this.resourceTypeFilterComboBox == null ? null : this.resourceTypeFilterComboBox.ComboBox;
+            if (combo == null || combo.IsDisposed || !combo.IsHandleCreated) return;
+
+            // The dropdown rows are owner-drawn, but the scrollbar belongs to the separate
+            // native list HWND (COMBOBOXINFO.hwndList). Theme both HWNDs only while the popup
+            // is closed. Applying the theme during the opening animation can dismiss the list.
+            if (this._resourceTypeFilterDropDownOpen || combo.DroppedDown) return;
+
+            string themeName = this._isDarkTheme ? "DarkMode_Explorer" : "Explorer";
+            try { SetWindowTheme(combo.Handle, themeName, null); } catch { }
 
             try
             {
-                int darkMode = isDark ? 1 : 0;
-                if (DwmSetWindowAttribute(this.Handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int)) != 0)
+                NativeComboBoxInfo info = new NativeComboBoxInfo
                 {
-                    DwmSetWindowAttribute(this.Handle, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, ref darkMode, sizeof(int));
+                    Size = Marshal.SizeOf(typeof(NativeComboBoxInfo))
+                };
+                if (GetComboBoxInfo(combo.Handle, ref info) && info.ListHandle != IntPtr.Zero)
+                {
+                    // This is the HWND that actually owns the native vertical scrollbar.
+                    // It is hidden here, so changing its theme/frame cannot interrupt selection.
+                    SetWindowTheme(info.ListHandle, themeName, null);
+                    SetWindowPos(info.ListHandle, IntPtr.Zero, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
                 }
-                SetWindowPos(this.Handle, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
             }
-            catch { }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
+            catch (ExternalException) { }
 
-            Color bgMain = isDark ? Color.FromArgb(28, 28, 28) : SystemColors.Control;
-            Color bgPanel = isDark ? Color.FromArgb(37, 37, 38) : SystemColors.Window;
-            Color bgInput = isDark ? Color.FromArgb(50, 50, 50) : SystemColors.Window;
-            Color fgText = isDark ? Color.FromArgb(220, 220, 220) : SystemColors.ControlText;
-            Color border = isDark ? Color.FromArgb(50, 50, 52) : SystemColors.ControlDark;
+            try { combo.Invalidate(); } catch (ObjectDisposedException) { }
+        }
 
-            this.BackColor = bgMain;
-            this.ForeColor = fgText;
+        private void QueueRcfTypeFilterOptionsRefresh(bool resetMissingArchiveFilter, bool refreshTreeWhenNeeded)
+        {
+            ComboBox combo = this.resourceTypeFilterComboBox == null ? null : this.resourceTypeFilterComboBox.ComboBox;
+            if (this._resourceTypeFilterDropDownOpen || (combo != null && combo.DroppedDown))
+            {
+                // Scanning is asynchronous; never touch ComboBox.Items or rebuild the tree while
+                // the native dropdown is opening/visible. The pending work is flushed after close.
+                this._rcfTypeFilterRefreshPending = true;
+                this._rcfTypeFilterRefreshPendingResetMissing |= resetMissingArchiveFilter;
+                this._rcfTypeFilterTreeRefreshPending |= refreshTreeWhenNeeded;
+                return;
+            }
 
-            this.menuStrip.BackColor = isDark ? Color.FromArgb(40, 40, 42) : SystemColors.Control;
-            this.mainToolStrip.BackColor = isDark ? Color.FromArgb(40, 40, 42) : SystemColors.Control;
-            this.filterToolStrip.BackColor = isDark ? Color.FromArgb(32, 32, 34) : SystemColors.Control;
-            this.viewModeToolStrip.BackColor = isDark ? Color.FromArgb(32, 32, 34) : SystemColors.Control;
-            this.channelToolStrip.BackColor = isDark ? Color.FromArgb(32, 32, 34) : SystemColors.Control;
-            this.treeContextMenu.BackColor = bgPanel;
-            this.treeContextMenu.ForeColor = fgText;
+            string previousP3DTypeFilter = this._archiveP3DNodeTypeFilter;
+            string previousExtensionFilter = this._archiveExtensionFilter;
+            this.RefreshResourceTypeFilterOptions(resetMissingArchiveFilter);
+            bool filterChanged = !string.Equals(previousP3DTypeFilter, this._archiveP3DNodeTypeFilter, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(previousExtensionFilter, this._archiveExtensionFilter, StringComparison.OrdinalIgnoreCase);
+            if (this._rcfFile != null && (refreshTreeWhenNeeded || filterChanged))
+                this.RefreshRcfTree();
+            this.ScheduleResourceTypeDropdownTheme();
+        }
 
-            this.searchTextBox.BackColor = bgInput;
-            this.searchTextBox.ForeColor = fgText;
-            this.sortComboBox.BackColor = bgInput;
-            this.sortComboBox.ForeColor = fgText;
+        private void OnResourceTypeFilterDropDownOpened()
+        {
+            this._resourceTypeFilterDropDownOpen = true;
+        }
 
-            this.nodeTreeView.BackColor = isDark ? Color.FromArgb(24, 24, 24) : SystemColors.Window;
-            this.nodeTreeView.ForeColor = fgText;
-            this.nodeTreeView.LineColor = isDark ? Color.FromArgb(70, 70, 70) : SystemColors.ControlDark;
+        private void OnResourceTypeFilterDropDownClosed()
+        {
+            this._resourceTypeFilterDropDownOpen = false;
+            if (!this._rcfTypeFilterRefreshPending)
+            {
+                // Now that the popup is closed it is safe to update the native scrollbar theme.
+                this.ScheduleResourceTypeDropdownTheme();
+                return;
+            }
+            bool resetMissing = this._rcfTypeFilterRefreshPendingResetMissing;
+            bool refreshTree = this._rcfTypeFilterTreeRefreshPending;
+            this._rcfTypeFilterRefreshPending = false;
+            this._rcfTypeFilterRefreshPendingResetMissing = false;
+            this._rcfTypeFilterTreeRefreshPending = false;
 
-            this.mainSplit.BackColor = border;
-            this.rightSplit.BackColor = border;
+            // Never clear/repopulate the native ComboBox from its own DropDownClosed event.
+            // Post to the UI queue; tree rebuilding is requested only when the active type
+            // filter actually depends on the scan, not merely because options became available.
+            try
+            {
+                if (!this.IsDisposed && this.IsHandleCreated)
+                    this.BeginInvoke((Action)(() => this.QueueRcfTypeFilterOptionsRefresh(resetMissing, refreshTree)));
+            }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
+        }
 
-            this.propGrid.ViewBackColor = bgPanel;
-            this.propGrid.ViewForeColor = fgText;
-            this.propGrid.LineColor = border;
-            this.propGrid.CategoryForeColor = isDark ? Color.FromArgb(86, 156, 214) : SystemColors.HotTrack;
+        private bool IsViewerThemeRelatedControl(Control control)
+        {
+            if (control == null || this.viewer3D == null || this.viewer3D.IsDisposed) return false;
 
-            this.previewBox.BackColor = isDark ? Color.FromArgb(16, 16, 16) : Color.FromArgb(235, 235, 235);
-            this.resolutionLabel.ForeColor = isDark ? Color.FromArgb(160, 160, 160) : SystemColors.GrayText;
+            // Match both parent chains explicitly; Control.Contains is not reliable for
+            // identifying every descendant when multiple nested panels/split containers exist.
+            for (Control current = this.viewer3D; current != null; current = current.Parent)
+                if (ReferenceEquals(current, control)) return true; // viewer or its ancestor
 
-            this.viewer3D.ApplyTheme(isDark);
-            this.Invalidate(true);
+            for (Control current = control; current != null; current = current.Parent)
+                if (ReferenceEquals(current, this.viewer3D)) return true; // viewer descendant
+
+            return false;
+        }
+
+        private void ApplyTheme(bool isDark)
+        {
+            this._isDarkTheme = isDark;
+            if (this.themeMenuItem != null)
+            {
+                this.themeMenuItem.Checked = isDark;
+                this.themeMenuItem.Text = UiLocalization.TranslateId("cmd.view.theme", "Тёмная тема", this._uiLanguage);
+            }
+            if (this.flipYMenuItem != null) this.flipYMenuItem.Checked = this._flipY;
+
+            // Suspend native redraw across child controls while changing their palettes.
+            // The old implementation invalidated the entire form immediately, causing
+            // every node in a large TreeView and all split panes to repaint separately.
+            var controls = new List<Control>();
+            // Do not suspend redraw on the top-level Form. WM_SETREDRAW on a top-level
+            // window can leave the DWM non-client caption stale until activation changes
+            // (for example, Alt+Tab). Batch only client-area controls.
+            foreach (Control child in this.Controls)
+                CollectControlsForTheme(child, controls);
+            var redrawSuspended = new List<Control>(controls.Count);
+            foreach (Control control in controls)
+            {
+                if (control == null || control.IsDisposed || !control.IsHandleCreated) continue;
+
+                // ElementHost/WPF Viewport3D manages its own composition and input routing.
+                // Do not suspend redraw on the viewer, its child controls, or the container
+                // path hosting it: WM_SETREDRAW can leave the WPF viewport blank/unresponsive
+                // after a theme toggle on some WinForms/WPF interop configurations.
+                if (this.IsViewerThemeRelatedControl(control)) continue;
+
+                try
+                {
+                    SendMessage(control.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+                    redrawSuspended.Add(control);
+                }
+                catch { /* A child can be destroyed while the theme is being switched. */ }
+            }
+
+            try
+            {
+                Color bgMain = isDark ? Color.FromArgb(28, 28, 28) : SystemColors.Control;
+                Color bgPanel = isDark ? Color.FromArgb(37, 37, 38) : SystemColors.Window;
+                Color bgInput = isDark ? Color.FromArgb(50, 50, 50) : SystemColors.Window;
+                Color fgText = isDark ? Color.FromArgb(220, 220, 220) : SystemColors.ControlText;
+                Color border = isDark ? Color.FromArgb(50, 50, 52) : SystemColors.ControlDark;
+
+                this.BackColor = bgMain;
+                this.ForeColor = fgText;
+
+                this.menuStrip.BackColor = isDark ? Color.FromArgb(40, 40, 42) : SystemColors.Control;
+                this.mainToolStrip.BackColor = isDark ? Color.FromArgb(40, 40, 42) : SystemColors.Control;
+                this.filterToolStrip.BackColor = isDark ? Color.FromArgb(32, 32, 34) : SystemColors.Control;
+                this.viewModeToolStrip.BackColor = isDark ? Color.FromArgb(32, 32, 34) : SystemColors.Control;
+                this.channelToolStrip.BackColor = isDark ? Color.FromArgb(32, 32, 34) : SystemColors.Control;
+                this.treeContextMenu.BackColor = bgPanel;
+                this.treeContextMenu.ForeColor = fgText;
+
+                this.searchTextBox.BackColor = bgInput;
+                this.searchTextBox.ForeColor = fgText;
+                if (this.searchTextBox.TextBox != null)
+                {
+                    this.searchTextBox.TextBox.BackColor = bgInput;
+                    this.searchTextBox.TextBox.ForeColor = fgText;
+                }
+                this.sortComboBox.BackColor = bgInput;
+                this.sortComboBox.ForeColor = fgText;
+                if (this.sortComboBox.ComboBox != null)
+                {
+                    this.sortComboBox.ComboBox.BackColor = bgInput;
+                    this.sortComboBox.ComboBox.ForeColor = fgText;
+                    this.sortComboBox.ComboBox.FlatStyle = FlatStyle.Flat;
+                }
+                if (this.resourceTypeFilterComboBox != null)
+                {
+                    this.resourceTypeFilterComboBox.BackColor = bgInput;
+                    this.resourceTypeFilterComboBox.ForeColor = fgText;
+                    this.resourceTypeFilterComboBox.FlatStyle = FlatStyle.Flat;
+                    if (this.resourceTypeFilterComboBox.ComboBox != null)
+                    {
+                        this.resourceTypeFilterComboBox.ComboBox.BackColor = bgInput;
+                        this.resourceTypeFilterComboBox.ComboBox.ForeColor = fgText;
+                        this.resourceTypeFilterComboBox.ComboBox.FlatStyle = FlatStyle.Flat;
+                        this.resourceTypeFilterComboBox.ComboBox.Invalidate();
+                        this.ScheduleResourceTypeDropdownTheme();
+                    }
+                }
+
+                this.nodeTreeView.BackColor = isDark ? Color.FromArgb(24, 24, 24) : SystemColors.Window;
+                this.nodeTreeView.ForeColor = fgText;
+                this.nodeTreeView.LineColor = isDark ? Color.FromArgb(70, 70, 70) : SystemColors.ControlDark;
+                this.nodeTreeView.AdditionalSelectionBackColor = isDark
+                    ? Color.FromArgb(56, 78, 104) : Color.FromArgb(211, 228, 248);
+                this.nodeTreeView.AdditionalSelectionForeColor = isDark ? Color.White : SystemColors.ControlText;
+                this.ApplyTreeNativeTheme(isDark);
+
+                this.mainSplit.BackColor = border;
+                this.rightSplit.BackColor = border;
+
+                this.propGrid.ViewBackColor = bgPanel;
+                this.propGrid.ViewForeColor = fgText;
+                this.propGrid.LineColor = border;
+                this.propGrid.CategoryForeColor = isDark ? Color.FromArgb(86, 156, 214) : SystemColors.HotTrack;
+
+                this.previewBox.BackColor = isDark ? Color.FromArgb(16, 16, 16) : Color.FromArgb(235, 235, 235);
+                this.resolutionLabel.ForeColor = isDark ? Color.FromArgb(160, 160, 160) : SystemColors.GrayText;
+
+                this.viewer3D.ApplyTheme(isDark);
+
+                // Set explicit DWM caption/border colors on Windows 11. On older Windows
+                // these attributes are unsupported, so DWMWA_USE_IMMERSIVE_DARK_MODE is
+                // the fallback and any unsupported HRESULT is intentionally ignored.
+                if (this.IsHandleCreated)
+                {
+                    try
+                    {
+                        int darkMode = isDark ? 1 : 0;
+                        if (DwmSetWindowAttribute(this.Handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int)) != 0)
+                            DwmSetWindowAttribute(this.Handle, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, ref darkMode, sizeof(int));
+
+                        Color caption = isDark ? Color.FromArgb(28, 28, 28) : Color.FromArgb(250, 250, 250);
+                        Color frame = isDark ? Color.FromArgb(48, 48, 50) : Color.FromArgb(210, 210, 210);
+                        Color captionText = isDark ? Color.FromArgb(235, 235, 235) : Color.FromArgb(25, 25, 25);
+                        int borderRef = ToColorRef(frame);
+                        int captionRef = ToColorRef(caption);
+                        int textRef = ToColorRef(captionText);
+                        DwmSetWindowAttribute(this.Handle, DWMWA_BORDER_COLOR, ref borderRef, sizeof(int));
+                        DwmSetWindowAttribute(this.Handle, DWMWA_CAPTION_COLOR, ref captionRef, sizeof(int));
+                        DwmSetWindowAttribute(this.Handle, DWMWA_TEXT_COLOR, ref textRef, sizeof(int));
+                    }
+                    catch { /* DWM theme attributes vary by Windows version. */ }
+                }
+            }
+            finally
+            {
+                // Re-enable children first and redraw the form tree once, instead of
+                // recursively invalidating it multiple times while colors are changing.
+                for (int i = redrawSuspended.Count - 1; i >= 0; i--)
+                {
+                    Control control = redrawSuspended[i];
+                    if (control == null || control.IsDisposed || !control.IsHandleCreated) continue;
+                    try { SendMessage(control.Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero); }
+                    catch { }
+                }
+
+                // Refresh the non-client frame after the current theme-switch message
+                // completes. DWM may otherwise apply caption attributes only on the next
+                // activation change; the user used to see a white/partly painted title bar
+                // until Alt+Tab. UPDATENOW forces the frame paint instead of deferring it.
+                ScheduleNonClientFrameRefresh();
+            }
+        }
+
+        private void ScheduleNonClientFrameRefresh()
+        {
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+            try
+            {
+                this.BeginInvoke((System.Windows.Forms.MethodInvoker)delegate
+                {
+                    if (this.IsDisposed || !this.IsHandleCreated) return;
+                    try
+                    {
+                        IntPtr hwnd = this.Handle;
+                        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
+                        // Force DefWindowProc/WinForms to repaint the caption in its current
+                        // active/inactive state, emulating the non-client repaint Windows does
+                        // after Alt+Tab, without changing which application owns focus.
+                        bool active = this.ContainsFocus || Form.ActiveForm == this;
+                        SendMessage(hwnd, WM_NCACTIVATE, new IntPtr(active ? 0 : 1), IntPtr.Zero);
+                        SendMessage(hwnd, WM_NCACTIVATE, new IntPtr(active ? 1 : 0), IntPtr.Zero);
+                        RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero,
+                            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME | RDW_UPDATENOW);
+                        DwmFlush();
+                    }
+                    catch (ExternalException) { /* DWM is unavailable on some Windows versions. */ }
+                    catch (InvalidOperationException) { /* Window is being disposed. */ }
+                });
+            }
+            catch (InvalidOperationException) { /* Handle can disappear during shutdown. */ }
         }
 
         public void OpenFile(string path)
         {
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
-
+            // Re-opening the exact same source is normally a no-op. If another RCF is still
+            // being indexed in the background, selecting the current document cancels that request.
+            if (SamePath(path, this._currentFilePath))
+            {
+                if (this._rcfOpenCts != null) this.CancelPendingRcfOpen();
+                return;
+            }
             string ext = Path.GetExtension(path).ToLowerInvariant();
 
             if (ext == ".rcf")
             {
-                if (MessageBox.Show("Вы открыли архив RCF игры. Распаковать его содержимое в папку?", "RCF Архив", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-                {
-                    using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog())
-                    {
-                        mfbd.Title = "Куда распаковать RCF архив?";
-                        if (mfbd.ShowDialog(this) == DialogResult.OK)
-                        {
-                            using (FileStream fs = File.OpenRead(path)) new CementFile(fs).Unpack(mfbd.SelectedPath);
-                            MessageBox.Show("Архив успешно распакован!", "RCF", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        }
-                    }
-                }
+                if (this._rcfOpenCts != null && SamePath(path, this._pendingRcfOpenPath)) return;
+                this.OpenRcfFileAsync(path);
                 return;
             }
 
+            // Opening another document invalidates any RCF request that is still reading its index.
+            this.CancelPendingRcfOpen();
+
             try
             {
+                // Parse into a temporary document first. If the selected file is invalid,
+                // keep the currently opened P3D/RCF and its tree intact.
+                Pure3DFile parsedFile;
                 using (FileStream fs = File.OpenRead(path))
+                using (MemoryStream decompressed = Utils.IsRZFile(path) ? new MemoryStream() : null)
                 {
-                    this._file = new Pure3DFile { GamePicked = PrototypeGame.Any };
-                    Stream stream = fs;
-
-                    if (Utils.IsRZFile(path))
+                    Stream input = fs;
+                    if (decompressed != null)
                     {
-                        stream = new MemoryStream();
-                        Utils.DecompressRZ(fs, stream);
-                        stream.Position = 0;
+                        Utils.DecompressRZ(fs, decompressed);
+                        decompressed.Position = 0;
+                        input = decompressed;
                     }
-
-                    this._file.Deserialize(stream, Endian.Little);
-                    if (stream != fs) stream.Dispose();
+                    parsedFile = new Pure3DFile { GamePicked = PrototypeGame.Any, Endian = Endian.Little };
+                    if (IsRawP3DChunkFile(path))
+                    {
+                        Endian detectedEndian;
+                        BaseNode rawNode = DeserializeRawP3DChunk(input, Endian.Little, parsedFile.GamePicked, path, out detectedEndian);
+                        parsedFile.Endian = detectedEndian;
+                        parsedFile.Nodes.Add(rawNode);
+                        WriteApplicationLog("RAW_CHUNK_OPEN", "Открыт сырой чанк: " + path + "; type=0x" + rawNode.TypeId.ToString("X8") + "; endian=" + detectedEndian);
+                    }
+                    else parsedFile.Deserialize(input, Endian.Little);
                 }
 
+                if (!this.PrepareToSwitchDocument(path)) return;
+                this.CancelPendingRcfTextureScan();
+                this.CancelPendingRcfEmbeddedP3DTypeScan();
+                this.ClearNodePreview();
+                this.propGrid.SelectedObject = null;
+                this._rcfFile = null;
+                this._rcfAnimationCatalogGeneration++;
+                if (this.viewer3D != null)
+                {
+                    this.viewer3D.SetAnimationNodeLoaders(new Dictionary<Animation, Func<Animation>>(), false);
+                    this.viewer3D.SetAnimationSourceFiles(new List<KeyValuePair<Pure3DFile, string>>(), false);
+                }
+                this._rcfHasUnsavedChanges = false;
+                this._fileHasUnsavedChanges = false;
+                this._rcfItems.Clear();
+                this._activeRcfItem = null;
+                this._rcfSmartExpansionPending = false;
+                this._archiveExtensionFilter = string.Empty;
+                this._archiveP3DNodeTypeFilter = string.Empty;
+                this._onlyTextures = false;
+                this._p3dNodeTypeFilter = string.Empty;
+                this.ClearUndoRedoHistory();
+                this._file = parsedFile;
                 this._currentFilePath = path;
                 this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(path);
 
                 this.CacheNodesMetadata();
+                this.RefreshResourceTypeFilterOptions(true);
                 this.RefreshTree();
+                this.UpdateMainToolbarState();
+                this.AddRecentFile(path);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка открытия файла: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                this.ShowLocalizedMessageBoxById(this, "message.open.fileFailed", "Ошибка открытия файла: {0}",
+                    "caption.error", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
             }
+        }
+
+        private void CancelPendingRcfOpen()
+        {
+            this._rcfOpenGeneration++;
+            CancellationTokenSource previous = this._rcfOpenCts;
+            this._rcfOpenCts = null;
+            this._pendingRcfOpenPath = null;
+            if (previous != null)
+            {
+                try { previous.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
+
+        private async void OpenRcfFileAsync(string path)
+        {
+            // Keep the currently open document intact while the candidate archive is read.
+            // All expensive archive-table and sidecar-index work happens before touching controls.
+            this.CancelPendingRcfOpen();
+            var cancellation = new CancellationTokenSource();
+            int generation = this._rcfOpenGeneration;
+            this._rcfOpenCts = cancellation;
+            this._pendingRcfOpenPath = path;
+
+            try
+            {
+                RcfOpenIndexResult loaded = await Task.Run(() =>
+                {
+                    Stopwatch indexTimer = Stopwatch.StartNew();
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    CementFile archive;
+                    using (FileStream fs = File.OpenRead(path))
+                        archive = new CementFile(fs, true);
+
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    List<RcfArchiveItem> items = CreateRcfArchiveItems(archive, cancellation.Token);
+                    List<RcfTextureCacheItem> textureCache = ReadRcfTextureIndexCache(path, items, cancellation.Token);
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    indexTimer.Stop();
+                    WriteApplicationLog("RCF_FILE_INDEX_READY", string.Format(CultureInfo.InvariantCulture,
+                        "Подготовлен индекс RCF в фоне: entries={0}, metadata={1}, wrappers={2}, textureCache={3}, elapsedMs={4:0.0}",
+                        archive.Entries.Count, archive.Metadatas.Count, items.Count,
+                        textureCache != null ? "hit" : "miss", indexTimer.Elapsed.TotalMilliseconds));
+                    return new RcfOpenIndexResult(archive, items, textureCache);
+                }, cancellation.Token);
+
+                if (this.IsDisposed || cancellation.IsCancellationRequested || generation != this._rcfOpenGeneration)
+                    return;
+                if (!this.PrepareToSwitchDocument(path)) return;
+                if (this.IsDisposed || cancellation.IsCancellationRequested || generation != this._rcfOpenGeneration)
+                    return;
+
+                // Install all parsed state atomically on the UI thread. The archive parse and
+                // cache I/O have already completed, so only the unavoidable control updates remain.
+                this.CancelPendingRcfTextureScan();
+                this.CancelPendingRcfEmbeddedP3DTypeScan();
+                this.ClearNodePreview();
+                this.propGrid.SelectedObject = null;
+                this.ResetRcfAnimationCatalogState();
+                this._rcfEntryParseTasks.Clear();
+                this._rcfFile = loaded.Archive;
+                this._rcfItems = loaded.Items;
+                this._rcfEmbeddedP3DRootTypes.Clear();
+                ApplyRcfTextureIndexCache(this._rcfItems, loaded.TextureCache);
+                this._rcfHasUnsavedChanges = false;
+                this._fileHasUnsavedChanges = false;
+                this._file = null;
+                this._onlyTextures = false;
+                this._archiveP3DNodeTypeFilter = string.Empty;
+                this._p3dNodeTypeFilter = string.Empty;
+                this._activeRcfItem = null;
+                this.ClearUndoRedoHistory();
+                this._rcfSmartExpansionPending = true;
+                this._currentFilePath = path;
+                this._cachedNodes.Clear();
+                this.RefreshResourceTypeFilterOptions(true);
+                this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(path) + " [RCF]";
+                this.RefreshTree();
+                this.UpdateMainToolbarState();
+                this.AddRecentFile(path);
+                this.StartRcfAnimationCatalogScanWithProgress();
+            }
+            catch (OperationCanceledException)
+            {
+                // Opening another file cancels this background read by design.
+            }
+            catch (Exception ex)
+            {
+                if (!this.IsDisposed && generation == this._rcfOpenGeneration)
+                    this.ShowLocalizedMessageBoxById(this, "message.open.rcfFailed", "Ошибка открытия RCF: {0}",
+                        "caption.error", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+            }
+            finally
+            {
+                if (ReferenceEquals(this._rcfOpenCts, cancellation))
+                {
+                    this._rcfOpenCts = null;
+                    this._pendingRcfOpenPath = null;
+                }
+                cancellation.Dispose();
+            }
+        }
+
+        private void ResetRcfAnimationCatalogState()
+        {
+            this.CancelPendingRcfAnimationSourceScan();
+            this._rcfAnimationCatalogGeneration++;
+            this._rcfAnimationItemsScanComplete = false;
+            if (this.viewer3D != null)
+            {
+                this.viewer3D.SetAnimationNodeLoaders(new Dictionary<Animation, Func<Animation>>(), false);
+                this.viewer3D.SetAnimationSourceFiles(new List<KeyValuePair<Pure3DFile, string>>(), false);
+            }
+        }
+
+        private static List<RcfArchiveItem> CreateRcfArchiveItems(CementFile archive, CancellationToken token = default(CancellationToken))
+        {
+            var result = new List<RcfArchiveItem>();
+            if (archive == null) return result;
+
+            var entriesByHash = archive.Entries
+                .GroupBy(entry => entry.Hash)
+                .ToDictionary(group => group.Key, group => new Queue<Entry>(group));
+            var usedEntries = new HashSet<Entry>();
+
+            foreach (Metadata metadata in archive.Metadatas)
+            {
+                token.ThrowIfCancellationRequested();
+                string fileName = (metadata.Name ?? string.Empty).TrimEnd('\0');
+                uint hash = Utils.RCFStringHash(fileName);
+                Queue<Entry> matches;
+                Entry entry = null;
+                if (entriesByHash.TryGetValue(hash, out matches) && matches.Count > 0)
+                {
+                    entry = matches.Dequeue();
+                    usedEntries.Add(entry);
+                }
+                result.Add(new RcfArchiveItem(archive, entry, metadata, fileName));
+            }
+
+            // Preserve table entries that have no path metadata instead of hiding them.
+            int orphanIndex = 0;
+            foreach (Entry entry in archive.Entries)
+            {
+                token.ThrowIfCancellationRequested();
+                if (usedEntries.Contains(entry)) continue;
+                string fallbackName = string.Format("__unmapped__/entry_{0:D5}_0x{1:X8}.bin", orphanIndex++, entry.Hash);
+                result.Add(new RcfArchiveItem(archive, entry, null, fallbackName));
+            }
+            return result;
+        }
+
+        private void BuildRcfArchiveItems()
+        {
+            this.ResetRcfAnimationCatalogState();
+            this._rcfItems = CreateRcfArchiveItems(this._rcfFile);
+            this._rcfEmbeddedP3DRootTypes.Clear();
+        }
+
+        // These are interface-owned labels. Actual extensions and P3D type names are data
+        // and intentionally remain unchanged; only the fixed filter labels use catalog IDs.
+        private static string LocalizeResourceTypeFilterOption(string value, string languageCode)
+        {
+            if (string.Equals(value, AllResourceTypesLabel, StringComparison.Ordinal))
+                return UiLocalization.TranslateId("filter.allTypes", AllResourceTypesLabel, languageCode);
+            if (string.Equals(value, NoExtensionFilterLabel, StringComparison.Ordinal))
+                return UiLocalization.TranslateId("filter.noExtension", NoExtensionFilterLabel, languageCode);
+            if (!string.IsNullOrEmpty(value) && value.StartsWith(RcfEmbeddedP3DTypePrefix, StringComparison.Ordinal))
+                return UiLocalization.TranslateId("filter.p3dPrefix", RcfEmbeddedP3DTypePrefix, languageCode) + value.Substring(RcfEmbeddedP3DTypePrefix.Length);
+            return value;
+        }
+
+        private static string NormalizeResourceTypeFilterOption(string displayValue, string languageCode)
+        {
+            if (string.Equals(displayValue, UiLocalization.TranslateId("filter.allTypes", AllResourceTypesLabel, languageCode), StringComparison.Ordinal))
+                return AllResourceTypesLabel;
+            if (string.Equals(displayValue, UiLocalization.TranslateId("filter.noExtension", NoExtensionFilterLabel, languageCode), StringComparison.Ordinal))
+                return NoExtensionFilterLabel;
+            string localizedPrefix = UiLocalization.TranslateId("filter.p3dPrefix", RcfEmbeddedP3DTypePrefix, languageCode);
+            if (!string.IsNullOrEmpty(displayValue) && displayValue.StartsWith(localizedPrefix, StringComparison.Ordinal))
+                return RcfEmbeddedP3DTypePrefix + displayValue.Substring(localizedPrefix.Length);
+            return displayValue;
+        }
+
+        private void RefreshResourceTypeFilterOptions(bool resetMissingArchiveFilter)
+        {
+            if (this.resourceTypeFilterComboBox == null) return;
+            ComboBox combo = this.resourceTypeFilterComboBox.ComboBox;
+            if (this._resourceTypeFilterDropDownOpen || (combo != null && combo.DroppedDown))
+            {
+                this._rcfTypeFilterRefreshPending = true;
+                this._rcfTypeFilterRefreshPendingResetMissing |= resetMissingArchiveFilter;
+                // A direct refresh request must never clear/repopulate Items while the native
+                // popup is opening or visible. Re-run the refresh from DropDownClosed instead.
+                return;
+            }
+
+            bool isRcfContext = this._rcfFile != null;
+            string desired = isRcfContext
+                ? (!string.IsNullOrEmpty(this._archiveP3DNodeTypeFilter)
+                    ? RcfEmbeddedP3DTypePrefix + this._archiveP3DNodeTypeFilter
+                    : (string.IsNullOrEmpty(this._archiveExtensionFilter) ? AllResourceTypesLabel :
+                        (this._archiveExtensionFilter == NoExtensionFilterToken ? NoExtensionFilterLabel : this._archiveExtensionFilter)))
+                : (string.IsNullOrEmpty(this._p3dNodeTypeFilter) ? AllResourceTypesLabel : this._p3dNodeTypeFilter);
+            string languageCode = this._uiLanguage;
+            string desiredDisplay = LocalizeResourceTypeFilterOption(desired, languageCode);
+
+            this._updatingResourceTypeFilter = true;
+            try
+            {
+                combo.BeginUpdate();
+                combo.Items.Clear();
+                combo.Items.Add(LocalizeResourceTypeFilterOption(AllResourceTypesLabel, languageCode));
+
+                if (isRcfContext && this._rcfItems != null)
+                {
+                    // For an RCF, filter actual archive files by their extensions.
+                    List<string> extensions = this._rcfItems
+                        .Where(item => item != null)
+                        .Select(item => GetRcfExtension(item.Name))
+                        .Where(extension => !string.IsNullOrEmpty(extension))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(extension => extension, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    foreach (string extension in extensions)
+                        combo.Items.Add(extension);
+                    if (this._rcfItems.Any(item => item != null && string.IsNullOrEmpty(GetRcfExtension(item.Name))))
+                        combo.Items.Add(LocalizeResourceTypeFilterOption(NoExtensionFilterLabel, languageCode));
+
+                    // The RCF list contains files one level deep, but P3D/RZ entries are
+                    // containers themselves. Include their top-level Pure3D section types
+                    // as a second level of the same filter (e.g. P3D: PolySkin).
+                    foreach (string nodeType in this._rcfEmbeddedP3DRootTypes
+                        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
+                        combo.Items.Add(LocalizeResourceTypeFilterOption(RcfEmbeddedP3DTypePrefix + nodeType, languageCode));
+                }
+                else if (this._file != null && this._file.Nodes != null)
+                {
+                    // Only first-level P3D sections are filter choices. Do not include internal
+                    // structures such as BoneList or other descendants from a section's Children.
+                    List<string> rootTypes = this._file.Nodes
+                        .Where(node => node != null)
+                        .Select(node => node.GetType().Name)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    foreach (string typeName in rootTypes)
+                        combo.Items.Add(typeName);
+                }
+
+                int selected = combo.Items.IndexOf(desiredDisplay);
+                if (selected < 0 && resetMissingArchiveFilter)
+                {
+                    this._archiveExtensionFilter = string.Empty;
+                    this._archiveP3DNodeTypeFilter = string.Empty;
+                    this._p3dNodeTypeFilter = string.Empty;
+                    desired = AllResourceTypesLabel;
+                    desiredDisplay = LocalizeResourceTypeFilterOption(desired, languageCode);
+                    selected = combo.Items.IndexOf(desiredDisplay);
+                }
+                if (selected < 0) selected = 0;
+
+                int dropDownWidth = Math.Max(205, combo.Width);
+                foreach (object item in combo.Items)
+                {
+                    string label = Convert.ToString(item) ?? string.Empty;
+                    int measuredWidth = TextRenderer.MeasureText(label, combo.Font).Width + 32;
+                    dropDownWidth = Math.Max(dropDownWidth, Math.Min(420, measuredWidth));
+                }
+                combo.DropDownWidth = dropDownWidth;
+                combo.MaxDropDownItems = Math.Min(24, Math.Max(8, combo.Items.Count));
+                combo.SelectedIndex = selected;
+                // The popup is a native standalone ComboBox. No Items changes occur when
+                // the user commits a filter choice, so the list closes once and stays closed.
+            }
+            finally
+            {
+                combo.EndUpdate();
+                this._updatingResourceTypeFilter = false;
+            }
+        }
+
+        private void OnResourceTypeFilterChanged()
+        {
+            if (this._updatingResourceTypeFilter || this.resourceTypeFilterComboBox == null) return;
+            string selected = this.resourceTypeFilterComboBox.ComboBox.SelectedItem as string;
+            selected = NormalizeResourceTypeFilterOption(selected, this._uiLanguage);
+
+            this._onlyTextures = false; // Legacy texture-only mode is no longer part of this filter.
+            this._p3dNodeTypeFilter = string.Empty;
+            this._archiveExtensionFilter = string.Empty;
+            this._archiveP3DNodeTypeFilter = string.Empty;
+
+            if (!string.IsNullOrEmpty(selected) && !string.Equals(selected, AllResourceTypesLabel, StringComparison.Ordinal))
+            {
+                if (this._rcfFile == null && this._file != null)
+                    this._p3dNodeTypeFilter = selected;
+                else if (selected.StartsWith(RcfEmbeddedP3DTypePrefix, StringComparison.Ordinal))
+                    this._archiveP3DNodeTypeFilter = selected.Substring(RcfEmbeddedP3DTypePrefix.Length);
+                else
+                    this._archiveExtensionFilter = string.Equals(selected, NoExtensionFilterLabel, StringComparison.Ordinal)
+                        ? NoExtensionFilterToken : selected.ToLowerInvariant();
+            }
+
+            this.SaveSettings();
+            this.RefreshTree();
+        }
+
+        private List<KeyValuePair<Pure3DFile, string>> GetParsedRcfAnimationSourceFiles(RcfArchiveItem preferredItem)
+        {
+            var result = new List<KeyValuePair<Pure3DFile, string>>();
+            var seen = new HashSet<Pure3DFile>();
+
+            Action<RcfArchiveItem> addSource = item =>
+            {
+                if (item == null) return;
+                Pure3DFile source = null;
+                bool isPreferred = ReferenceEquals(item, preferredItem);
+                if (item.ParsedFileModified && item.ParsedFile != null)
+                {
+                    // Modified entries must use their live tree because the disk-derived catalog is stale.
+                    source = item.ParsedFile;
+                }
+                else if (item.AnimationSourceFile != null && item.Entry != null &&
+                    item.AnimationSourceDataRevision == item.Entry.DataRevision)
+                {
+                    // Use the compact catalog for both active and inactive entries. The actual mesh
+                    // still comes from ParsedFile; swapping this animation source to a full tree on
+                    // every selection would invalidate the global source index and re-run matching.
+                    source = item.AnimationSourceFile;
+                }
+                else if (item.AnimationSourceFile != null &&
+                    (item.Entry == null || item.AnimationSourceDataRevision != item.Entry.DataRevision))
+                {
+                    item.AnimationSourceFile = null;
+                    item.AnimationSourceDataRevision = -1;
+                    item.AnimationCatalogScannedRevision = -1;
+                    if (item.AnimationLoaders != null) item.AnimationLoaders.Clear();
+                    if (isPreferred && item.ParsedFile != null)
+                    {
+                        // Fallback for a changed entry whose new data has not been re-indexed yet.
+                        source = item.ParsedFile;
+                    }
+                }
+                else if (isPreferred && item.ParsedFile != null)
+                {
+                    // Fallback for a newly added entry without an index.
+                    source = item.ParsedFile;
+                }
+
+                // Do not pull full ParsedFile trees from previously visited entries into the
+                // archive-wide animation source set. They are large, can churn the source index,
+                // and are not needed when the compact catalog is current.
+                if (source != null && seen.Add(source))
+                    result.Add(new KeyValuePair<Pure3DFile, string>(source, item.Name));
+            };
+
+            addSource(preferredItem);
+            if (this._rcfItems != null)
+                foreach (RcfArchiveItem item in this._rcfItems)
+                    if (!ReferenceEquals(item, preferredItem)) addSource(item);
+            return result;
+        }
+
+        private List<KeyValuePair<Pure3DFile, string>> GetStandaloneAnimationSourceFiles(Pure3DFile p3d)
+        {
+            var result = new List<KeyValuePair<Pure3DFile, string>>();
+            if (p3d == null)
+                return result;
+
+            string label = string.IsNullOrWhiteSpace(this._currentFilePath)
+                ? string.Empty
+                : Path.GetFileName(this._currentFilePath);
+            result.Add(new KeyValuePair<Pure3DFile, string>(p3d, label));
+            return result;
+        }
+
+        private Dictionary<Animation, Func<Animation>> GetRcfAnimationLoadersForSources(
+            IEnumerable<KeyValuePair<Pure3DFile, string>> sources)
+        {
+            var result = new Dictionary<Animation, Func<Animation>>();
+            if (sources == null || this._rcfItems == null) return result;
+            var visibleLightweightSources = new HashSet<Pure3DFile>(sources
+                .Where(source => source.Key != null).Select(source => source.Key));
+            foreach (RcfArchiveItem item in this._rcfItems)
+            {
+                if (item == null || item.AnimationSourceFile == null || item.ParsedFileModified ||
+                    item.Entry == null || item.Entry.DataRevision != item.AnimationSourceDataRevision ||
+                    !visibleLightweightSources.Contains(item.AnimationSourceFile) || item.AnimationLoaders == null)
+                    continue;
+                foreach (KeyValuePair<Animation, Func<Animation>> pair in item.AnimationLoaders)
+                    if (pair.Key != null && pair.Value != null) result[pair.Key] = pair.Value;
+            }
+            return result;
+        }
+
+        private void CancelPendingRcfAnimationSourceScan()
+        {
+            this._rcfAnimationSourceScanGeneration++;
+            CancellationTokenSource previous = this._rcfAnimationSourceScanCts;
+            this._rcfAnimationSourceScanCts = null;
+            this._rcfAnimationSourceScanArchive = null;
+            if (previous != null)
+            {
+                try { previous.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
+
+        /// <summary>
+        /// Builds one lightweight index for the entire RCF as soon as it is opened.
+        /// The progress dialog is modal so archive entries cannot be changed during the index pass.
+        /// Archive records stay file-backed; only Animation/Skeleton metadata is parsed, and per-source
+        /// track/joint indexes are prepared before the dialog closes. Keyframe payloads are not loaded.
+        /// </summary>
+        private void StartRcfAnimationCatalogScanWithProgress()
+        {
+            if (this._rcfFile == null || this._rcfItems == null) return;
+            CementFile archive = this._rcfFile;
+            List<RcfArchiveItem> items = this._rcfItems.ToList();
+            string animationCacheArchivePath = this._currentFilePath;
+            RcfAnimationCacheIdentity animationCacheIdentity = this._rcfHasUnsavedChanges
+                ? null : TryGetRcfAnimationCacheIdentity(animationCacheArchivePath);
+            if (items.Count == 0)
+            {
+                this._rcfAnimationItemsScanComplete = true;
+                if (this.viewer3D != null)
+                    this.viewer3D.SetAnimationNodeLoaders(new Dictionary<Animation, Func<Animation>>(), false);
+                return;
+            }
+
+            this.CancelPendingRcfAnimationSourceScan();
+            this.CancelPendingRcfEmbeddedP3DTypeScan();
+            int generation = ++this._rcfAnimationCatalogGeneration;
+            int scanGeneration = this._rcfAnimationSourceScanGeneration;
+            var cts = new CancellationTokenSource();
+            this._rcfAnimationSourceScanCts = cts;
+            this._rcfAnimationSourceScanArchive = archive;
+            this._rcfAnimationItemsScanComplete = false;
+            WriteApplicationLog("RCF_ANIMATION_INDEX_BEGIN", "Подготовка индекса анимаций RCF; записей=" + items.Count);
+
+            // Registry creation may reflect over many Pure3D node types. It is prepared by the
+            // indexing worker below rather than by the UI thread before the progress form opens.
+            using (var progressForm = new RcfAnimationScanProgressForm(this._uiLanguage, this._isDarkTheme, items.Count))
+            {
+                progressForm.Shown += async (sender, args) =>
+                {
+                    try
+                    {
+                        var progress = new Progress<RcfAnimationScanProgress>(value =>
+                            progressForm.UpdateProgress(value.Current, value.Total, value.EntryName));
+                        RcfAnimationArchiveScanResult result = await Task.Run(() =>
+                        {
+                            try { NodeFactory.CreateNodeCandidates(0U, PrototypeGame.Any); }
+                            catch (Exception ex) { WriteApplicationLog("RCF_ANIMATION_INDEX_REGISTRY", "Не удалось подготовить каталог типов Pure3D.", ex); }
+
+                            cts.Token.ThrowIfCancellationRequested();
+                            RcfAnimationArchiveScanResult cached = animationCacheIdentity == null
+                                ? null
+                                : TryLoadRcfAnimationIndexCache(items, animationCacheIdentity, progress, cts.Token);
+                            if (cached != null)
+                            {
+                                WriteApplicationLog("RCF_ANIMATION_INDEX_CACHE_HIT", "Загружен сохранённый индекс анимаций RCF: " + animationCacheIdentity.FullPath);
+                                return cached;
+                            }
+
+                            if (animationCacheIdentity != null)
+                                WriteApplicationLog("RCF_ANIMATION_INDEX_CACHE_MISS", "Сохранённый индекс анимаций RCF отсутствует или устарел; выполняется сканирование.");
+                            else
+                                WriteApplicationLog("RCF_ANIMATION_INDEX_CACHE_SKIPPED", "Дисковый кэш пропущен: исходный RCF ещё не сохранён на диске.");
+                            RcfAnimationArchiveScanResult scanned = ScanRcfAnimationArchive(items, progress, cts.Token, animationCacheIdentity != null);
+                            if (animationCacheIdentity != null)
+                            {
+                                if (SaveRcfAnimationIndexCache(items, scanned, animationCacheIdentity))
+                                    WriteApplicationLog("RCF_ANIMATION_INDEX_CACHE_SAVED", "Сохранён индекс анимаций RCF: " + animationCacheIdentity.FullPath);
+                                else
+                                    WriteApplicationLog("RCF_ANIMATION_INDEX_CACHE_NOT_SAVED", "Дисковый кэш анимаций не сохранён: архив изменён во время сканирования или кэш превышает допустимый размер.");
+                            }
+                            // The source objects/loaders and prepared indexes have their own metadata trees;
+                            // serialized byte snapshots are only needed until the sidecar has been written.
+                            foreach (RcfAnimationSourceScanItem scanItem in scanned.Items) scanItem.ClearPersistentCacheData();
+                            return scanned;
+                        }, cts.Token);
+
+                        if (this.IsDisposed || generation != this._rcfAnimationCatalogGeneration ||
+                            scanGeneration != this._rcfAnimationSourceScanGeneration || !ReferenceEquals(this._rcfFile, archive))
+                            return;
+
+                        this._rcfEmbeddedP3DRootTypes.Clear();
+                        foreach (RcfAnimationSourceScanItem scanned in result.Items)
+                        {
+                            RcfArchiveItem item = scanned.Item;
+                            if (item == null) continue;
+                            if (item.Entry == null || item.Entry.DataRevision != scanned.DataRevision) continue;
+                            item.EmbeddedP3DRootTypes = scanned.RootTypes ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            foreach (string typeName in item.EmbeddedP3DRootTypes)
+                                this._rcfEmbeddedP3DRootTypes.Add(typeName);
+
+                            item.AnimationCatalogScannedRevision = scanned.DataRevision;
+                            if (item.ParsedFileModified)
+                            {
+                                // The editable in-memory file is authoritative for modified entries.
+                                item.AnimationSourceFile = null;
+                                item.AnimationSourceDataRevision = -1;
+                                item.AnimationLoaders.Clear();
+                                continue;
+                            }
+
+                            item.AnimationSourceFile = scanned.AnimationSourceFile;
+                            item.AnimationSourceDataRevision = scanned.DataRevision;
+                            item.AnimationLoaders = scanned.AnimationLoaders ?? new Dictionary<Animation, Func<Animation>>();
+                        }
+
+                        this._rcfAnimationItemsScanComplete = true;
+                        WriteApplicationLog("RCF_ANIMATION_INDEX_COMPLETE", "Полное сканирование RCF завершено; записей=" +
+                            result.Items.Count + "; анимаций=" + result.AnimationCount + "; скелетов=" + result.SkeletonCount +
+                            "; корневых типов=" + this._rcfEmbeddedP3DRootTypes.Count);
+
+                        if (this.viewer3D != null)
+                        {
+                            TreeNode selectedTreeNode = this.nodeTreeView == null ? null : this.nodeTreeView.SelectedNode;
+                            BaseNode selectedNode = selectedTreeNode == null ? null : selectedTreeNode.Tag as BaseNode;
+                            RcfArchiveItem activeItem = selectedTreeNode == null ? null : this.FindRcfEntryAncestor(selectedTreeNode);
+                            if (activeItem != null && selectedNode is CompositeDrawable && ReferenceEquals(activeItem, this._activeRcfItem))
+                            {
+                                List<KeyValuePair<Pure3DFile, string>> sources = this.GetParsedRcfAnimationSourceFiles(activeItem);
+                                this.viewer3D.SetAnimationNodeLoaders(this.GetRcfAnimationLoadersForSources(sources), false);
+                                this.viewer3D.SetAnimationSourceFiles(sources, false);
+                                this.viewer3D.RegisterPreparedAnimationSourceIndexes(result.Items
+                                    .Where(scanItem => scanItem != null)
+                                    .Select(scanItem => scanItem.PreparedAnimationIndex));
+                                this.viewer3D.SetAnimationSourceFiles(sources, true);
+                            }
+                            else
+                            {
+                                this.viewer3D.SetAnimationNodeLoaders(new Dictionary<Animation, Func<Animation>>(), false);
+                                this.viewer3D.RegisterPreparedAnimationSourceIndexes(result.Items
+                                    .Where(scanItem => scanItem != null)
+                                    .Select(scanItem => scanItem.PreparedAnimationIndex));
+                            }
+                        }
+
+                        this.QueueRcfTypeFilterOptionsRefresh(true, !string.IsNullOrEmpty(this._archiveP3DNodeTypeFilter));
+                        progressForm.UpdateProgress(items.Count, items.Count,
+                            UiLocalization.TranslateId("scan.rcfAnimations.complete", "Сканирование RCF завершено", this._uiLanguage));
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        WriteApplicationLog("RCF_ANIMATION_INDEX_CANCELLED", "Сканирование анимаций RCF отменено.");
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteApplicationLog("RCF_ANIMATION_INDEX_FAILED", "Не удалось полностью проиндексировать анимации RCF.", ex);
+                        this.ShowLocalizedMessageBoxById(this, "message.rcfAnimationScan.failed",
+                            "Не удалось проиндексировать все анимации RCF: {0}", "caption.error", "Ошибка",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+                    }
+                    finally
+                    {
+                        if (ReferenceEquals(this._rcfAnimationSourceScanCts, cts))
+                        {
+                            this._rcfAnimationSourceScanCts = null;
+                            this._rcfAnimationSourceScanArchive = null;
+                        }
+                        try { cts.Dispose(); } catch { }
+                        if (!progressForm.IsDisposed) progressForm.Close();
+                    }
+                };
+                progressForm.ShowDialog(this);
+            }
+        }
+
+        private static RcfAnimationArchiveScanResult ScanRcfAnimationArchive(
+            IList<RcfArchiveItem> items, IProgress<RcfAnimationScanProgress> progress, CancellationToken token, bool allowPersistentCache)
+        {
+            var result = new RcfAnimationArchiveScanResult();
+            int total = items == null ? 0 : items.Count;
+            int reportStep = Math.Max(1, total / 160);
+            var rootTypeNameCache = new Dictionary<uint, string[]>();
+            var channelTypeCache = new Dictionary<uint, bool>();
+            long lastMemoryCheckpoint = GC.GetTotalMemory(false);
+            const long ScanTransientMemoryBudget = 384L * 1024L * 1024L;
+            const long MaxPersistentCachePayload = 256L * 1024L * 1024L;
+            long persistentCachePayload = 0;
+            bool capturePersistentCache = allowPersistentCache;
+            result.CacheCanBePersisted = allowPersistentCache;
+            for (int i = 0; i < total; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                RcfArchiveItem item = items[i];
+                var scanned = new RcfAnimationSourceScanItem
+                {
+                    Item = item,
+                    Name = item == null ? string.Empty : item.Name,
+                    DataRevision = item == null || item.Entry == null ? -1 : item.Entry.DataRevision,
+                    RootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                    AnimationLoaders = new Dictionary<Animation, Func<Animation>>()
+                };
+
+                if (item != null && item.CanContainP3D && progress != null)
+                    progress.Report(new RcfAnimationScanProgress { Current = i, Total = Math.Max(1, total), EntryName = scanned.Name });
+
+                if (item != null && item.CanContainP3D && item.Entry != null && item.Entry.HasData && item.Entry.DataLength >= 12)
+                {
+                    try
+                    {
+                        ScanRcfP3DEntryForAnimationCatalog(scanned, token, rootTypeNameCache, channelTypeCache, capturePersistentCache);
+                        result.AnimationCount += scanned.AnimationLoaders.Count;
+                        if (scanned.AnimationSourceFile != null)
+                            result.SkeletonCount += scanned.AnimationSourceFile.Nodes.OfType<Skeleton>().Count();
+                        if (capturePersistentCache)
+                        {
+                            if (!scanned.CacheSerializable || persistentCachePayload + scanned.PersistentCacheBytes > MaxPersistentCachePayload)
+                            {
+                                capturePersistentCache = false;
+                                result.CacheCanBePersisted = false;
+                                foreach (RcfAnimationSourceScanItem previous in result.Items) previous.ClearPersistentCacheData();
+                                scanned.ClearPersistentCacheData();
+                            }
+                            else
+                            {
+                                persistentCachePayload += scanned.PersistentCacheBytes;
+                            }
+                        }
+                        else
+                        {
+                            scanned.ClearPersistentCacheData();
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        scanned.ParseError = ex.Message;
+                        WriteApplicationLog("RCF_ANIMATION_INDEX_ENTRY_FAILED", "Не удалось проиндексировать " + scanned.Name + "; запись пропущена.", ex);
+                    }
+                }
+
+                result.Items.Add(scanned);
+                if ((i + 1) % 8 == 0 || i + 1 == total)
+                {
+                    long managedBytes = GC.GetTotalMemory(false);
+                    if (managedBytes - lastMemoryCheckpoint > ScanTransientMemoryBudget)
+                    {
+                        // Run on the scan worker only, never the UI thread. Compacting the LOH
+                        // is reserved for substantial transient growth; normal small scans pay no cost.
+                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                        lastMemoryCheckpoint = GC.GetTotalMemory(false);
+                    }
+                }
+                if (progress != null && ((i + 1) % reportStep == 0 || i + 1 == total))
+                    progress.Report(new RcfAnimationScanProgress { Current = i + 1, Total = Math.Max(1, total), EntryName = scanned.Name });
+            }
+            return result;
+        }
+
+        private static void ScanRcfP3DEntryForAnimationCatalog(RcfAnimationSourceScanItem scanned, CancellationToken token,
+            Dictionary<uint, string[]> typeNameCache, Dictionary<uint, bool> channelTypeCache, bool capturePersistentCache)
+        {
+            RcfArchiveItem sourceItem = scanned.Item;
+            if (sourceItem == null || sourceItem.Entry == null || sourceItem.Entry.DataRevision != scanned.DataRevision) return;
+            using (Stream source = sourceItem.Entry.OpenDataRead())
+            {
+                Stream input = source;
+                FileStream decompressed = null;
+                string decompressedPath = null;
+                try
+                {
+                    if (Utils.IsRZFile(scanned.Name))
+                    {
+                        decompressed = DecompressRZToTemporaryFile(source, out decompressedPath);
+                        input = decompressed;
+                    }
+
+                    Endian endian;
+                    long fileEnd;
+                    if (!TryReadP3DOuterHeader(input, out endian, out fileEnd)) return;
+
+                    var lightweight = new Pure3DFile { GamePicked = PrototypeGame.Any, Endian = endian };
+                    scanned.SourceEndian = endian;
+                    uint animationType = RcfCatalogAnimationTypeId;
+                    uint skeletonType = RcfCatalogSkeletonTypeId;
+                    while (input.Position + 12L <= fileEnd)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        long chunkStart = input.Position;
+                        uint typeId = input.ReadValueU32(endian);
+                        uint headerSize = input.ReadValueU32(endian);
+                        uint totalSize = input.ReadValueU32(endian);
+                        if (headerSize < 12U || totalSize < headerSize || totalSize > fileEnd - chunkStart)
+                            throw new FormatException("Invalid Pure3D root chunk header.");
+                        long chunkEnd = chunkStart + totalSize;
+                        AddRcfRootTypeName(typeId, typeNameCache, scanned.RootTypes);
+
+                        if (typeId == animationType || typeId == skeletonType)
+                        {
+                            try
+                            {
+                                input.Position = chunkStart;
+                                if (typeId == skeletonType)
+                                {
+                                    BaseNode root = Pure3DFile.DeserializeNode(input, endian, null, PrototypeGame.Any);
+                                    if (root is Skeleton)
+                                    {
+                                        lightweight.Nodes.Add(root);
+                                        if (capturePersistentCache)
+                                        {
+                                            byte[] skeletonBytes = TryReadChunkBytesForAnimationCache(input, chunkStart, totalSize);
+                                            if (skeletonBytes == null)
+                                                scanned.CacheSerializable = false;
+                                            else
+                                            {
+                                                scanned.CachedSkeletonChunks.Add(skeletonBytes);
+                                                scanned.PersistentCacheBytes += skeletonBytes.Length;
+                                            }
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    // Create a compact synthetic chunk containing only animation/bone/channel metadata.
+                                    // It preserves enough information to rebuild the index without revisiting the RCF.
+                                    byte[] compactBytes = null;
+                                    Animation metadata;
+                                    if (capturePersistentCache)
+                                    {
+                                        compactBytes = BuildCompactAnimationChunkForCache(input, endian, chunkStart, chunkEnd,
+                                            channelTypeCache, token);
+                                        using (var compactStream = new MemoryStream(compactBytes, false))
+                                            metadata = ReadCompactAnimationChunk(compactStream, endian, 0L, compactStream.Length, channelTypeCache, token);
+                                    }
+                                    else
+                                    {
+                                        metadata = ReadCompactAnimationChunk(input, endian, chunkStart, chunkEnd, channelTypeCache, token);
+                                    }
+                                    if (metadata != null)
+                                    {
+                                        metadata.StartPosition = checked((uint)chunkStart);
+                                        lightweight.Nodes.Add(metadata);
+                                        long offset = chunkStart;
+                                        Entry entrySnapshot = sourceItem.Entry;
+                                        long revisionSnapshot = scanned.DataRevision;
+                                        string entryName = scanned.Name;
+                                        Endian chunkEndian = endian;
+                                        scanned.AnimationLoaders[metadata] = CreateRcfAnimationLoader(entrySnapshot, revisionSnapshot, entryName, offset, chunkEndian);
+                                        if (capturePersistentCache)
+                                        {
+                                            if (compactBytes.Length > 64 * 1024 * 1024)
+                                                scanned.CacheSerializable = false;
+                                            else
+                                            {
+                                                scanned.CachedAnimations.Add(new RcfAnimationCachedChunk(offset, chunkEndian, compactBytes));
+                                                scanned.PersistentCacheBytes += compactBytes.Length;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception ex)
+                            {
+                                WriteApplicationLog("RCF_ANIMATION_INDEX_CHUNK_FAILED", "Не удалось разобрать чанк анимации/скелета в " + scanned.Name + "; offset=" + chunkStart, ex);
+                            }
+                        }
+                        input.Position = chunkEnd;
+                    }
+                    lightweight.Endian = endian;
+                    scanned.AnimationSourceFile = lightweight.Nodes.Count > 0 ? lightweight : null;
+                    if (scanned.AnimationSourceFile != null)
+                    {
+                        // Index channel tracks and skeleton joints now, during the modal whole-RCF
+                        // scan. This avoids delayed/on-demand indexing as users switch composites.
+                        scanned.PreparedAnimationIndex = Model3DViewer.PrepareAnimationSourceIndexForCatalog(scanned.AnimationSourceFile);
+                    }
+                }
+                finally
+                {
+                    if (decompressed != null) decompressed.Dispose();
+                    DeleteTemporaryFileQuietly(decompressedPath);
+                }
+            }
+        }
+
+        private static bool TryReadP3DOuterHeader(Stream input, out Endian endian, out long fileEnd)
+        {
+            endian = Endian.Little;
+            fileEnd = 0;
+            if (input == null || !input.CanSeek || input.Length < 12) return false;
+            input.Position = 0;
+            uint signature = input.ReadValueU32(Endian.Little);
+            if (signature != 1345537279U && signature.Swap() != 1345537279U) return false;
+            input.Position = 4;
+            uint littleHeader = input.ReadValueU32(Endian.Little);
+            uint littleTotal = input.ReadValueU32(Endian.Little);
+            bool littleValid = littleHeader == 12U && littleTotal >= 12U && littleTotal <= input.Length;
+            input.Position = 4;
+            uint bigHeader = input.ReadValueU32(Endian.Big);
+            uint bigTotal = input.ReadValueU32(Endian.Big);
+            bool bigValid = bigHeader == 12U && bigTotal >= 12U && bigTotal <= input.Length;
+            if (littleValid)
+            {
+                endian = Endian.Little;
+                fileEnd = littleTotal;
+                input.Position = littleHeader;
+                return true;
+            }
+            if (bigValid)
+            {
+                endian = Endian.Big;
+                fileEnd = bigTotal;
+                input.Position = bigHeader;
+                return true;
+            }
+            return false;
+        }
+
+        private static void AddRcfRootTypeName(uint typeId, Dictionary<uint, string[]> cache, HashSet<string> rootTypes)
+        {
+            string[] names;
+            if (!cache.TryGetValue(typeId, out names))
+            {
+                try
+                {
+                    List<BaseNode> candidates = NodeFactory.CreateNodeCandidates(typeId, PrototypeGame.Any);
+                    names = candidates.Count == 0
+                        ? new[] { typeof(Unknown).Name }
+                        : candidates.Select(candidate => candidate.GetType().Name).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                }
+                catch { names = new[] { typeof(Unknown).Name }; }
+                cache[typeId] = names;
+            }
+            foreach (string name in names) rootTypes.Add(name);
+        }
+
+        private static Func<Animation> CreateRcfAnimationLoader(Entry entry, long expectedRevision, string entryName, long offset, Endian endian)
+        {
+            return delegate
+            {
+                if (entry == null || entry.DataRevision != expectedRevision)
+                    throw new InvalidOperationException("The RCF entry changed after its animation catalogue was built.");
+                return LoadRcfAnimationAtOffset(entry, entryName, offset, endian);
+            };
+        }
+
+        private static Animation LoadRcfAnimationAtOffset(Entry entry, string entryName, long offset, Endian endian)
+        {
+            if (entry == null || !entry.HasData) return null;
+            using (Stream source = entry.OpenDataRead())
+            {
+                Stream input = source;
+                FileStream decompressed = null;
+                string decompressedPath = null;
+                try
+                {
+                    if (Utils.IsRZFile(entryName))
+                    {
+                        decompressed = DecompressRZToTemporaryFile(source, out decompressedPath);
+                        input = decompressed;
+                    }
+                    if (offset < 12 || offset + 12 > input.Length) throw new FormatException("Animation chunk offset is outside the P3D stream.");
+                    input.Position = offset;
+                    BaseNode node = Pure3DFile.DeserializeNode(input, endian, null, PrototypeGame.Any);
+                    Animation animation = node as Animation;
+                    if (animation == null) throw new FormatException("Indexed chunk is no longer an Animation.");
+                    return animation;
+                }
+                finally
+                {
+                    if (decompressed != null) decompressed.Dispose();
+                    DeleteTemporaryFileQuietly(decompressedPath);
+                }
+            }
+        }
+
+        private static FileStream DecompressRZToTemporaryFile(Stream compressedSource, out string temporaryPath)
+        {
+            temporaryPath = Path.Combine(Path.GetTempPath(), "PrototypeUltimateTool_RcfAnimation_" + Guid.NewGuid().ToString("N") + ".tmp");
+            FileStream output = null;
+            try
+            {
+                output = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
+                    1024 * 1024, FileOptions.RandomAccess);
+                Utils.DecompressRZ(compressedSource, output);
+                output.Flush();
+                output.Position = 0;
+                return output;
+            }
+            catch
+            {
+                if (output != null) output.Dispose();
+                DeleteTemporaryFileQuietly(temporaryPath);
+                temporaryPath = null;
+                throw;
+            }
+        }
+
+        private static void DeleteTemporaryFileQuietly(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
+
+        private static byte[] BuildCompactAnimationChunkForCache(Stream input, Endian endian, long chunkStart,
+            long chunkEnd, Dictionary<uint, bool> channelTypeCache, CancellationToken token)
+        {
+            long originalPosition = input.Position;
+            try
+            {
+                input.Position = chunkStart;
+                uint typeId = input.ReadValueU32(endian);
+                uint headerSize = input.ReadValueU32(endian);
+                uint totalSize = input.ReadValueU32(endian);
+                if (typeId != RcfCatalogAnimationTypeId || headerSize < 12U || totalSize < headerSize ||
+                    chunkStart + totalSize != chunkEnd || chunkEnd > input.Length || headerSize > 1024U * 1024U)
+                    throw new FormatException("Invalid Animation header while building persistent metadata.");
+
+                byte[] header = ReadExactRange(input, chunkStart, checked((int)headerSize));
+                using (var output = new MemoryStream())
+                {
+                    long rootStart = output.Position;
+                    output.Write(header, 0, header.Length);
+                    input.Position = chunkStart + headerSize;
+                    CopyCompactAnimationMetadataChildren(input, endian, chunkEnd, output, channelTypeCache, token, 0, false);
+                    RewriteChunkTotalSize(output, rootStart, output.Position, endian);
+                    return output.ToArray();
+                }
+            }
+            finally
+            {
+                input.Position = originalPosition;
+            }
+        }
+
+        private static void CopyCompactAnimationMetadataChildren(Stream input, Endian endian, long parentEnd,
+            Stream output, Dictionary<uint, bool> channelTypeCache, CancellationToken token, int depth, bool insideBone)
+        {
+            if (depth > 128) throw new FormatException("Animation metadata nesting is too deep.");
+            while (input.Position < parentEnd)
+            {
+                token.ThrowIfCancellationRequested();
+                long chunkStart = input.Position;
+                if (chunkStart + 12L > parentEnd) throw new FormatException("Truncated child chunk header while caching animation metadata.");
+                uint typeId = input.ReadValueU32(endian);
+                uint headerSize = input.ReadValueU32(endian);
+                uint totalSize = input.ReadValueU32(endian);
+                if (headerSize < 12U || totalSize < headerSize || totalSize > parentEnd - chunkStart || headerSize > 1024U * 1024U)
+                    throw new FormatException("Invalid child chunk header while caching animation metadata.");
+                long chunkEnd = chunkStart + totalSize;
+
+                if (typeId == RcfCatalogAnimationDataTypeId)
+                {
+                    input.Position = chunkEnd;
+                    continue;
+                }
+
+                if (typeId == RcfCatalogAnimationBoneTypeId)
+                {
+                    byte[] header = ReadExactRange(input, chunkStart, checked((int)headerSize));
+                    long outputStart = output.Position;
+                    output.Write(header, 0, header.Length);
+                    input.Position = chunkStart + headerSize;
+                    CopyCompactAnimationMetadataChildren(input, endian, chunkEnd, output, channelTypeCache, token, depth + 1, true);
+                    RewriteChunkTotalSize(output, outputStart, output.Position, endian);
+                    continue;
+                }
+
+                bool compactChannel = insideBone && headerSize >= 20U && IsCatalogAnimationChannelType(typeId, channelTypeCache);
+                bool legacyTrackMarker = insideBone &&
+                    (typeId == RcfCatalogBoneRotationTypeId || typeId == RcfCatalogBoneTranslationTypeId);
+                if (compactChannel || legacyTrackMarker)
+                {
+                    byte[] header = ReadExactRange(input, chunkStart, checked((int)headerSize));
+                    long outputStart = output.Position;
+                    output.Write(header, 0, header.Length);
+                    RewriteChunkTotalSize(output, outputStart, output.Position, endian);
+                    input.Position = chunkEnd;
+                    continue;
+                }
+
+                // This mirrors the runtime compact parser: unknown wrapper chunks are traversed
+                // recursively while their own payload is omitted from the persistent index.
+                input.Position = chunkStart + headerSize;
+                CopyCompactAnimationMetadataChildren(input, endian, chunkEnd, output, channelTypeCache, token, depth + 1, insideBone);
+                if (input.Position != chunkEnd)
+                    throw new FormatException("Animation wrapper exceeds its declared size while caching metadata.");
+            }
+        }
+
+        private static void RewriteChunkTotalSize(Stream output, long chunkStart, long chunkEnd, Endian endian)
+        {
+            long length = chunkEnd - chunkStart;
+            if (length < 12 || length > uint.MaxValue) throw new FormatException("Compact animation chunk size is invalid.");
+            long originalPosition = output.Position;
+            output.Position = chunkStart + 8L;
+            output.WriteValueU32((uint)length, endian);
+            output.Position = originalPosition;
+        }
+
+        private static byte[] ReadExactRange(Stream input, long start, int count)
+        {
+            if (count < 0) throw new ArgumentOutOfRangeException("count");
+            byte[] bytes = new byte[count];
+            long originalPosition = input.Position;
+            try
+            {
+                input.Position = start;
+                int offset = 0;
+                while (offset < bytes.Length)
+                {
+                    int read = input.Read(bytes, offset, bytes.Length - offset);
+                    if (read <= 0) throw new EndOfStreamException("Unexpected end of chunk while reading animation metadata.");
+                    offset += read;
+                }
+                return bytes;
+            }
+            finally { input.Position = originalPosition; }
+        }
+
+        private static byte[] TryReadChunkBytesForAnimationCache(Stream input, long chunkStart, uint totalSize)
+        {
+            const uint MaximumPersistentSkeletonChunk = 64U * 1024U * 1024U;
+            if (totalSize < 12U || totalSize > MaximumPersistentSkeletonChunk) return null;
+            try { return ReadExactRange(input, chunkStart, checked((int)totalSize)); }
+            catch { return null; }
+        }
+
+        private static RcfAnimationCacheIdentity TryGetRcfAnimationCacheIdentity(string archivePath)
+        {
+            if (string.IsNullOrWhiteSpace(archivePath)) return null;
+            try
+            {
+                string fullPath = Path.GetFullPath(archivePath);
+                if (!File.Exists(fullPath)) return null;
+                var info = new FileInfo(fullPath);
+                return new RcfAnimationCacheIdentity
+                {
+                    FullPath = fullPath,
+                    Length = info.Length,
+                    LastWriteTimeUtcTicks = info.LastWriteTimeUtc.Ticks
+                };
+            }
+            catch { return null; }
+        }
+
+        private static string GetRcfAnimationIndexCachePath(RcfAnimationCacheIdentity identity)
+        {
+            if (identity == null || string.IsNullOrWhiteSpace(identity.FullPath)) return null;
+            try
+            {
+                byte[] pathBytes = Encoding.UTF8.GetBytes(identity.FullPath.ToUpperInvariant());
+                using (SHA256 sha = SHA256.Create())
+                {
+                    string key = BitConverter.ToString(sha.ComputeHash(pathBytes)).Replace("-", string.Empty);
+                    string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "PrototypeUltimateTool", "AnimationIndex");
+                    return Path.Combine(directory, key + ".idx.gz");
+                }
+            }
+            catch { return null; }
+        }
+
+        private static bool ArchiveIdentityStillMatches(RcfAnimationCacheIdentity expected)
+        {
+            RcfAnimationCacheIdentity actual = expected == null ? null : TryGetRcfAnimationCacheIdentity(expected.FullPath);
+            return actual != null && string.Equals(actual.FullPath, expected.FullPath, StringComparison.OrdinalIgnoreCase) &&
+                actual.Length == expected.Length && actual.LastWriteTimeUtcTicks == expected.LastWriteTimeUtcTicks;
+        }
+
+        private static RcfAnimationArchiveScanResult TryLoadRcfAnimationIndexCache(IList<RcfArchiveItem> items,
+            RcfAnimationCacheIdentity identity, IProgress<RcfAnimationScanProgress> progress, CancellationToken token)
+        {
+            string cachePath = GetRcfAnimationIndexCachePath(identity);
+            if (cachePath == null || !File.Exists(cachePath) || !ArchiveIdentityStillMatches(identity)) return null;
+            const long MaximumCacheFileLength = 256L * 1024L * 1024L;
+            const long MaximumExpandedCacheLength = 256L * 1024L * 1024L;
+            try
+            {
+                var cacheInfo = new FileInfo(cachePath);
+                if (cacheInfo.Length <= 0 || cacheInfo.Length > MaximumCacheFileLength) return null;
+                var result = new RcfAnimationArchiveScanResult { CacheCanBePersisted = true, LoadedFromDiskCache = true };
+                var channelTypeCache = new Dictionary<uint, bool>();
+                long expandedBytes = 0;
+                using (FileStream fs = File.OpenRead(cachePath))
+                using (var gzip = new GZipStream(fs, CompressionMode.Decompress, false))
+                using (var reader = new BinaryReader(gzip, Encoding.UTF8))
+                {
+                    if (reader.ReadInt32() != 0x31414950 || reader.ReadInt32() != 1) return null; // PIA1
+                    if (!string.Equals(reader.ReadString(), identity.FullPath, StringComparison.OrdinalIgnoreCase) ||
+                        reader.ReadInt64() != identity.Length || reader.ReadInt64() != identity.LastWriteTimeUtcTicks)
+                        return null;
+                    int itemCount = reader.ReadInt32();
+                    if (items == null || itemCount != items.Count || itemCount < 0 || itemCount > 2000000) return null;
+
+                    for (int i = 0; i < itemCount; i++)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        string name = reader.ReadString();
+                        uint hash = reader.ReadUInt32();
+                        long dataLength = reader.ReadInt64();
+                        RcfArchiveItem item = items[i];
+                        if (item == null || item.Entry == null || !string.Equals(name, item.Name, StringComparison.Ordinal) ||
+                            hash != item.Entry.Hash || dataLength != item.Entry.DataLength)
+                            return null;
+
+                        int endianValue = reader.ReadInt32();
+                        if (endianValue != (int)Endian.Little && endianValue != (int)Endian.Big) return null;
+                        Endian sourceEndian = (Endian)endianValue;
+                        string parseError = reader.ReadString();
+                        var rootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        int rootTypeCount = reader.ReadInt32();
+                        if (rootTypeCount < 0 || rootTypeCount > 8192) return null;
+                        for (int j = 0; j < rootTypeCount; j++) rootTypes.Add(reader.ReadString());
+
+                        bool shouldBuildTree = string.IsNullOrEmpty(parseError) && item.CanContainP3D && item.Entry.HasData;
+                        var scanned = new RcfAnimationSourceScanItem
+                        {
+                            Item = item,
+                            Name = item.Name,
+                            DataRevision = item.Entry.DataRevision,
+                            RootTypes = rootTypes,
+                            SourceEndian = sourceEndian,
+                            ParseError = string.IsNullOrEmpty(parseError) ? null : parseError
+                        };
+                        var lightweight = shouldBuildTree
+                            ? new Pure3DFile { GamePicked = PrototypeGame.Any, Endian = sourceEndian }
+                            : null;
+
+                        int animationCount = reader.ReadInt32();
+                        if (animationCount < 0 || animationCount > 1000000) return null;
+                        for (int j = 0; j < animationCount; j++)
+                        {
+                            long offset = reader.ReadInt64();
+                            int animationEndianValue = reader.ReadInt32();
+                            if (offset < 12 || offset > uint.MaxValue ||
+                                (animationEndianValue != (int)Endian.Little && animationEndianValue != (int)Endian.Big)) return null;
+                            Endian animationEndian = (Endian)animationEndianValue;
+                            byte[] bytes = ReadBoundedCacheBytes(reader, 64 * 1024 * 1024);
+                            expandedBytes += bytes.Length;
+                            if (expandedBytes > MaximumExpandedCacheLength) return null;
+                            if (shouldBuildTree)
+                            {
+                                using (var compactStream = new MemoryStream(bytes, false))
+                                {
+                                    Animation metadata = ReadCompactAnimationChunk(compactStream, animationEndian, 0L,
+                                        compactStream.Length, channelTypeCache, token);
+                                    if (metadata == null) return null;
+                                    metadata.StartPosition = checked((uint)offset);
+                                    lightweight.Nodes.Add(metadata);
+                                    scanned.AnimationLoaders[metadata] = CreateRcfAnimationLoader(item.Entry,
+                                        item.Entry.DataRevision, item.Name, offset, animationEndian);
+                                }
+                            }
+                        }
+
+                        int skeletonCount = reader.ReadInt32();
+                        if (skeletonCount < 0 || skeletonCount > 100000) return null;
+                        for (int j = 0; j < skeletonCount; j++)
+                        {
+                            byte[] bytes = ReadBoundedCacheBytes(reader, 64 * 1024 * 1024);
+                            if (bytes.Length < 12) return null;
+                            expandedBytes += bytes.Length;
+                            if (expandedBytes > MaximumExpandedCacheLength) return null;
+                            if (shouldBuildTree)
+                            {
+                                using (var skeletonStream = new MemoryStream(bytes, false))
+                                {
+                                    BaseNode node = Pure3DFile.DeserializeNode(skeletonStream, sourceEndian, null, PrototypeGame.Any);
+                                    if (node is Skeleton) lightweight.Nodes.Add(node);
+                                }
+                            }
+                        }
+
+                        scanned.AnimationSourceFile = lightweight != null && lightweight.Nodes.Count > 0 ? lightweight : null;
+                        if (scanned.AnimationSourceFile != null)
+                            scanned.PreparedAnimationIndex = Model3DViewer.PrepareAnimationSourceIndexForCatalog(scanned.AnimationSourceFile);
+                        result.AnimationCount += scanned.AnimationLoaders.Count;
+                        if (scanned.AnimationSourceFile != null)
+                            result.SkeletonCount += scanned.AnimationSourceFile.Nodes.OfType<Skeleton>().Count();
+                        result.Items.Add(scanned);
+                        if (progress != null && ((i + 1) % Math.Max(1, itemCount / 160) == 0 || i + 1 == itemCount))
+                            progress.Report(new RcfAnimationScanProgress { Current = i + 1, Total = Math.Max(1, itemCount), EntryName = name });
+                    }
+                    if (reader.BaseStream.ReadByte() != -1) return null;
+                }
+
+                if (!ArchiveIdentityStillMatches(identity)) return null;
+                return result;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch
+            {
+                // Missing/corrupt/old sidecars are disposable; a normal source scan is the fallback.
+                return null;
+            }
+        }
+
+        private static byte[] ReadBoundedCacheBytes(BinaryReader reader, int maximumLength)
+        {
+            int length = reader.ReadInt32();
+            if (length < 0 || length > maximumLength) throw new InvalidDataException("Animation cache chunk length is invalid.");
+            byte[] bytes = reader.ReadBytes(length);
+            if (bytes.Length != length) throw new EndOfStreamException("Animation cache is truncated.");
+            return bytes;
+        }
+
+        private static bool SaveRcfAnimationIndexCache(IList<RcfArchiveItem> items,
+            RcfAnimationArchiveScanResult result, RcfAnimationCacheIdentity identity)
+        {
+            string cachePath = GetRcfAnimationIndexCachePath(identity);
+            if (cachePath == null || result == null || !result.CacheCanBePersisted || items == null ||
+                result.Items.Count != items.Count || !ArchiveIdentityStillMatches(identity)) return false;
+            const long MaximumExpandedCacheLength = 256L * 1024L * 1024L;
+            long expandedBytes = 0;
+            foreach (RcfAnimationSourceScanItem scanned in result.Items)
+            {
+                if (scanned == null || !scanned.CacheSerializable || scanned.Item == null || scanned.Item.Entry == null ||
+                    scanned.DataRevision != scanned.Item.Entry.DataRevision ||
+                    !string.Equals(scanned.Name, scanned.Item.Name, StringComparison.Ordinal) ||
+                    scanned.Item.Entry.DataLength < 0) return false;
+                expandedBytes += scanned.PersistentCacheBytes;
+                if (expandedBytes > MaximumExpandedCacheLength) return false;
+                foreach (RcfAnimationCachedChunk chunk in scanned.CachedAnimations)
+                    if (chunk == null || chunk.MetadataBytes == null || chunk.MetadataBytes.Length > 64 * 1024 * 1024) return false;
+            }
+
+            string tempPath = cachePath + ".tmp";
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(cachePath));
+                using (FileStream fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    using (var gzip = new GZipStream(fs, CompressionLevel.Optimal, true))
+                    using (var writer = new BinaryWriter(gzip, Encoding.UTF8))
+                    {
+                        writer.Write(0x31414950); // PIA1
+                        writer.Write(1);
+                        writer.Write(identity.FullPath);
+                        writer.Write(identity.Length);
+                        writer.Write(identity.LastWriteTimeUtcTicks);
+                        writer.Write(items.Count);
+                        for (int i = 0; i < items.Count; i++)
+                        {
+                            RcfArchiveItem item = items[i];
+                            RcfAnimationSourceScanItem scanned = result.Items[i];
+                            writer.Write(item.Name ?? string.Empty);
+                            writer.Write(item.Entry != null ? item.Entry.Hash : 0U);
+                            writer.Write(item.Entry != null ? item.Entry.DataLength : 0L);
+                            writer.Write((int)scanned.SourceEndian);
+                            writer.Write(scanned.ParseError ?? string.Empty);
+                            string[] rootTypes = scanned.RootTypes == null ? new string[0] : scanned.RootTypes.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray();
+                            writer.Write(rootTypes.Length);
+                            foreach (string rootType in rootTypes) writer.Write(rootType ?? string.Empty);
+                            writer.Write(scanned.CachedAnimations.Count);
+                            foreach (RcfAnimationCachedChunk chunk in scanned.CachedAnimations)
+                            {
+                                writer.Write(chunk.Offset);
+                                writer.Write((int)chunk.Endian);
+                                writer.Write(chunk.MetadataBytes.Length);
+                                writer.Write(chunk.MetadataBytes);
+                            }
+                            writer.Write(scanned.CachedSkeletonChunks.Count);
+                            foreach (byte[] skeletonBytes in scanned.CachedSkeletonChunks)
+                            {
+                                writer.Write(skeletonBytes.Length);
+                                writer.Write(skeletonBytes);
+                            }
+                        }
+                    }
+                    fs.Flush();
+                }
+
+                if (!ArchiveIdentityStillMatches(identity))
+                {
+                    try { File.Delete(tempPath); } catch { }
+                    return false;
+                }
+                if (File.Exists(cachePath)) File.Delete(cachePath);
+                File.Move(tempPath, cachePath);
+                return true;
+            }
+            catch
+            {
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                return false;
+            }
+        }
+
+        private static Animation ReadCompactAnimationChunk(Stream input, Endian endian, long chunkStart,
+            long chunkEnd, Dictionary<uint, bool> channelTypeCache, CancellationToken token)
+        {
+            input.Position = chunkStart;
+            uint typeId = input.ReadValueU32(endian);
+            uint headerSize = input.ReadValueU32(endian);
+            uint totalSize = input.ReadValueU32(endian);
+            if (typeId != RcfCatalogAnimationTypeId || headerSize < 12U || totalSize < headerSize ||
+                chunkStart + totalSize != chunkEnd || chunkEnd > input.Length)
+                throw new FormatException("Invalid Animation root header.");
+
+            var animation = new Animation
+            {
+                Game = PrototypeGame.Any,
+                ID = typeId,
+                StartPosition = checked((uint)chunkStart),
+                HeaderSize = headerSize,
+                TotalSize = totalSize
+            };
+            input.Position = chunkStart + 12L;
+            animation.Deserialize(input, endian);
+            if (input.Position != chunkStart + headerSize)
+                throw new FormatException("Animation header size mismatch.");
+
+            input.Position = chunkStart + headerSize;
+            while (input.Position < chunkEnd)
+            {
+                token.ThrowIfCancellationRequested();
+                ReadCompactAnimationChild(input, endian, chunkEnd, animation, null, channelTypeCache, token, 0);
+            }
+            if (input.Position != chunkEnd) throw new FormatException("Animation children exceed the declared chunk size.");
+            return animation;
+        }
+
+        private static void ReadCompactAnimationChild(Stream input, Endian endian, long parentEnd, Animation animation,
+            AnimationBone currentBone, Dictionary<uint, bool> channelTypeCache, CancellationToken token, int depth)
+        {
+            if (depth > 128) throw new FormatException("Animation metadata nesting is too deep.");
+            token.ThrowIfCancellationRequested();
+            long chunkStart = input.Position;
+            if (chunkStart + 12L > parentEnd) throw new FormatException("Truncated child chunk header in Animation.");
+
+            uint typeId = input.ReadValueU32(endian);
+            uint headerSize = input.ReadValueU32(endian);
+            uint totalSize = input.ReadValueU32(endian);
+            if (headerSize < 12U || totalSize < headerSize || totalSize > parentEnd - chunkStart)
+                throw new FormatException("Invalid child chunk header in Animation.");
+            long chunkEnd = chunkStart + totalSize;
+            if (typeId == RcfCatalogAnimationDataTypeId)
+            {
+                // This chunk contains compressed frame samples. Its size is already in the
+                // parent bounds; seeking over it avoids allocating CompressedData byte arrays.
+                input.Position = chunkEnd;
+                return;
+            }
+
+            if (typeId == RcfCatalogAnimationBoneTypeId)
+            {
+                var bone = new AnimationBone
+                {
+                    Game = PrototypeGame.Any,
+                    ID = typeId,
+                    StartPosition = checked((uint)chunkStart),
+                    HeaderSize = headerSize,
+                    TotalSize = totalSize,
+                    ParentNode = currentBone == null ? (BaseNode)animation : currentBone
+                };
+                input.Position = chunkStart + 12L;
+                bone.Deserialize(input, endian);
+                if (input.Position != chunkStart + headerSize)
+                    throw new FormatException("AnimationBone header size mismatch.");
+                if (currentBone == null) animation.Children.Add(bone);
+                else currentBone.Children.Add(bone);
+
+                input.Position = chunkStart + headerSize;
+                while (input.Position < chunkEnd)
+                    ReadCompactAnimationChild(input, endian, chunkEnd, animation, bone, channelTypeCache, token, depth + 1);
+                if (input.Position != chunkEnd) throw new FormatException("AnimationBone children exceed the declared size.");
+                return;
+            }
+
+            if (IsCatalogAnimationChannelType(typeId, channelTypeCache))
+            {
+                // AnimationChannel's common metadata is just Version + a FourCC TranslationType.
+                // Never invoke concrete channel Deserialize here because it reads all inline frames.
+                if (headerSize >= 20U && currentBone != null)
+                {
+                    input.Position = chunkStart + 12L;
+                    uint version = input.ReadValueU32(endian);
+                    string translationType = input.ReadString(4);
+                    string normalizedType = (translationType ?? string.Empty).Trim().TrimEnd('\0', ' ');
+                    if (string.Equals(normalizedType, "ROT", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(normalizedType, "TRAN", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var channel = new CatalogAnimationChannel
+                        {
+                            Game = PrototypeGame.Any,
+                            ID = typeId,
+                            StartPosition = checked((uint)chunkStart),
+                            HeaderSize = headerSize,
+                            TotalSize = totalSize,
+                            Version = version,
+                            TranslationType = translationType,
+                            ParentNode = currentBone,
+                            Frames = null,
+                            FrameOrder = null
+                        };
+                        currentBone.Children.Add(channel);
+                    }
+                }
+                input.Position = chunkEnd;
+                return;
+            }
+
+            if (typeId == RcfCatalogBoneRotationTypeId && currentBone != null)
+            {
+                var marker = new BoneRotationData
+                {
+                    Game = PrototypeGame.Any,
+                    ID = typeId,
+                    StartPosition = checked((uint)chunkStart),
+                    HeaderSize = headerSize,
+                    TotalSize = totalSize,
+                    Param = (FourCC)"ROT ",
+                    NumFrames = 1,
+                    Frames = new ushort[] { 0 },
+                    Values = new Gibbed.Prototype.FileFormats.Vector4[] { new Gibbed.Prototype.FileFormats.Vector4() },
+                    ParentNode = currentBone
+                };
+                currentBone.Children.Add(marker);
+                input.Position = chunkEnd;
+                return;
+            }
+
+            if (typeId == RcfCatalogBoneTranslationTypeId && currentBone != null)
+            {
+                var marker = new BoneTranslationData
+                {
+                    Game = PrototypeGame.Any,
+                    ID = typeId,
+                    StartPosition = checked((uint)chunkStart),
+                    HeaderSize = headerSize,
+                    TotalSize = totalSize,
+                    Param = (FourCC)"TRAN",
+                    NumFrames = 1,
+                    Frames = new ushort[] { 0 },
+                    Values = new Nixson.Common.Vector3[] { new Nixson.Common.Vector3() },
+                    ParentNode = currentBone
+                };
+                currentBone.Children.Add(marker);
+                input.Position = chunkEnd;
+                return;
+            }
+
+            // Wrapper chunks are not retained. Skip their own payload and recursively inspect
+            // child chunk headers so AnimationBones/channels nested beneath wrappers are found.
+            input.Position = chunkStart + headerSize;
+            while (input.Position < chunkEnd)
+                ReadCompactAnimationChild(input, endian, chunkEnd, animation, currentBone, channelTypeCache, token, depth + 1);
+            if (input.Position != chunkEnd) throw new FormatException("Animation wrapper children exceed the declared size.");
+        }
+
+        private static bool IsCatalogAnimationChannelType(uint typeId, Dictionary<uint, bool> cache)
+        {
+            bool isChannel;
+            if (cache != null && cache.TryGetValue(typeId, out isChannel)) return isChannel;
+            try
+            {
+                isChannel = NodeFactory.CreateNodeCandidates(typeId, PrototypeGame.Any).Any(candidate => candidate is AnimationChannel);
+            }
+            catch { isChannel = false; }
+            if (cache != null) cache[typeId] = isChannel;
+            return isChannel;
+        }
+
+        private sealed class CatalogAnimationChannel : AnimationChannel
+        {
+            protected override void ReadChannel(Stream input, Endian endian) { }
+            public override Gibbed.Prototype.FileFormats.Vector4 CalculateValue(float frame)
+            {
+                return new Gibbed.Prototype.FileFormats.Vector4();
+            }
+        }
+
+        private void CancelPendingRcfEmbeddedP3DTypeScan()
+        {
+            this._rcfEmbeddedP3DTypeScanGeneration++;
+            this._rcfTypeFilterRefreshPending = false;
+            this._rcfTypeFilterRefreshPendingResetMissing = false;
+            this._rcfTypeFilterTreeRefreshPending = false;
+            CancellationTokenSource previous = this._rcfEmbeddedP3DTypeScanCts;
+            this._rcfEmbeddedP3DTypeScanCts = null;
+            if (previous != null)
+            {
+                try { previous.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
+
+        private void StartRcfEmbeddedP3DTypeScanAsync()
+        {
+            this.CancelPendingRcfEmbeddedP3DTypeScan();
+            this._rcfEmbeddedP3DRootTypes.Clear();
+            if (this._rcfItems != null)
+                foreach (RcfArchiveItem currentItem in this._rcfItems)
+                    if (currentItem != null)
+                        currentItem.EmbeddedP3DRootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (this._rcfFile == null || this._rcfItems == null)
+                return;
+
+            // Snapshot entry identities/revisions; payload data is streamed from its source file.
+            List<Tuple<RcfArchiveItem, string, long>> sources = this._rcfItems
+                .Where(item => item != null && item.CanContainP3D && item.Entry != null && item.Entry.HasData && item.Entry.DataLength >= 12)
+                .Select(item => Tuple.Create(item, item.Name, item.Entry.DataRevision))
+                .ToList();
+            if (sources.Count == 0)
+            {
+                this._rcfEmbeddedP3DRootTypes.Clear();
+                return;
+            }
+
+            // Ensure the type registry is fully built on the UI thread before the background
+            // worker reads it, avoiding first-use registry initialization races.
+            try { NodeFactory.CreateNodeCandidates(0U, PrototypeGame.Any); }
+            catch (Exception ex) { WriteApplicationLog("RCF_TYPE_SCAN_REGISTRY", "Не удалось подготовить каталог типов Pure3D.", ex); }
+
+            int generation = this._rcfEmbeddedP3DTypeScanGeneration;
+            CancellationTokenSource cts = new CancellationTokenSource();
+            this._rcfEmbeddedP3DTypeScanCts = cts;
+            WriteApplicationLog("RCF_TYPE_SCAN_BEGIN", "Сканирование типов в P3D/RZ внутри RCF; файлов=" + sources.Count);
+
+            Task<Dictionary<RcfArchiveItem, HashSet<string>>> task = Task.Run(() =>
+            {
+                var found = new Dictionary<RcfArchiveItem, HashSet<string>>();
+                foreach (Tuple<RcfArchiveItem, string, long> source in sources)
+                {
+                    cts.Token.ThrowIfCancellationRequested();
+                    if (source.Item1.Entry == null || source.Item1.Entry.DataRevision != source.Item3) continue;
+                    try
+                    {
+                        HashSet<string> discoveredTypes = ScanEmbeddedP3DRootTypes(source.Item1.Entry, source.Item2, cts.Token);
+                        found[source.Item1] = discoveredTypes;
+                        if (discoveredTypes.Count > 0)
+                        {
+                            RcfArchiveItem scannedItem = source.Item1;
+                            HashSet<string> scannedTypesSnapshot = new HashSet<string>(discoveredTypes, StringComparer.OrdinalIgnoreCase);
+                            try
+                            {
+                                // Publish newly discovered root types as the scan progresses. The
+                                // filter must not depend on the user expanding a particular P3D row.
+                                this.BeginInvoke((Action)(() => this.MergeScannedRcfP3DTypes(scannedItem, scannedTypesSnapshot, generation)));
+                            }
+                            catch (ObjectDisposedException) { }
+                            catch (InvalidOperationException) { }
+                        }
+                        WriteApplicationLog("RCF_TYPE_SCAN_ENTRY_OK", "Типы корневых секций для " + source.Item2 +
+                            "; найдено=" + discoveredTypes.Count +
+                            (discoveredTypes.Count > 0 ? "; типы=" + string.Join(", ", discoveredTypes.OrderBy(name => name, StringComparer.OrdinalIgnoreCase)) : "; типы не определены"));
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        found[source.Item1] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        WriteApplicationLog("RCF_TYPE_SCAN_ENTRY_ERROR", "Не удалось прочитать корневые типы из " + source.Item2, ex);
+                    }
+                }
+                return found;
+            }, cts.Token);
+
+            task.ContinueWith(completed =>
+            {
+                if (completed.IsCanceled || completed.IsFaulted)
+                {
+                    if (completed.IsFaulted)
+                        WriteApplicationLog("RCF_TYPE_SCAN_ERROR", "Сканирование типов внутри RCF завершилось ошибкой.", completed.Exception);
+                    cts.Dispose();
+                    return;
+                }
+                if (this.IsDisposed || !this.IsHandleCreated)
+                {
+                    cts.Dispose();
+                    return;
+                }
+                try
+                {
+                    this.BeginInvoke((Action)(() =>
+                    {
+                        if (generation != this._rcfEmbeddedP3DTypeScanGeneration || this._rcfFile == null)
+                        {
+                            cts.Dispose();
+                            return;
+                        }
+
+                        this._rcfEmbeddedP3DRootTypes.Clear();
+                        foreach (RcfArchiveItem item in this._rcfItems)
+                        {
+                            var types = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            HashSet<string> scannedTypes;
+                            if (completed.Result.TryGetValue(item, out scannedTypes) && scannedTypes != null)
+                                types.UnionWith(scannedTypes);
+
+                            // A P3D may already have been parsed when the user expanded it in
+                            // the tree. Use the parsed root nodes as a second source of truth;
+                            // this also covers entries whose raw header scan encountered an
+                            // unsupported Type ID in a different sibling chunk.
+                            if (item != null && item.ParsedFile != null && item.ParsedFile.Nodes != null)
+                            {
+                                foreach (BaseNode rootNode in item.ParsedFile.Nodes)
+                                    if (rootNode != null) types.Add(rootNode.GetType().Name);
+                            }
+
+                            item.EmbeddedP3DRootTypes = types;
+                            foreach (string typeName in types) this._rcfEmbeddedP3DRootTypes.Add(typeName);
+                        }
+
+                        WriteApplicationLog("RCF_TYPE_SCAN_COMPLETE", "Сканирование типов внутри RCF завершено; файлов=" +
+                            completed.Result.Count + "; типов=" + this._rcfEmbeddedP3DRootTypes.Count);
+                        if (ReferenceEquals(this._rcfEmbeddedP3DTypeScanCts, cts))
+                            this._rcfEmbeddedP3DTypeScanCts = null;
+
+                        if (generation == this._rcfEmbeddedP3DTypeScanGeneration && this._rcfFile != null)
+                        {
+                            // Scan completion updates the choices immediately but does not rebuild
+                            // the tree unless the active P3D-type filter depends on the new index.
+                            // A gratuitous RefreshRcfTree here used to collapse the expanded P3D row
+                            // the first time the dropdown was opened.
+                            this.QueueRcfTypeFilterOptionsRefresh(true,
+                                !string.IsNullOrEmpty(this._archiveP3DNodeTypeFilter));
+                        }
+                        cts.Dispose();
+                    }));
+                }
+                catch (ObjectDisposedException) { cts.Dispose(); }
+                catch (InvalidOperationException) { cts.Dispose(); }
+            }, TaskScheduler.Default);
+        }
+
+        private void MergeScannedRcfP3DTypes(RcfArchiveItem item, HashSet<string> discoveredTypes, int generation)
+        {
+            if (this.IsDisposed || generation != this._rcfEmbeddedP3DTypeScanGeneration || this._rcfFile == null || item == null)
+                return;
+
+            if (item.EmbeddedP3DRootTypes == null)
+                item.EmbeddedP3DRootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool globalTypeSetChanged = false;
+            foreach (string typeName in discoveredTypes ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(typeName)) continue;
+                item.EmbeddedP3DRootTypes.Add(typeName);
+                if (this._rcfEmbeddedP3DRootTypes.Add(typeName)) globalTypeSetChanged = true;
+            }
+
+            // Refill the list only when a new global choice appears. Do not parse/open the
+            // P3D item and do not rebuild the tree from the scan progress callback.
+            if (globalTypeSetChanged)
+                this.QueueRcfTypeFilterOptionsRefresh(false, false);
+        }
+
+        private static HashSet<string> ScanEmbeddedP3DRootTypes(Entry entry, string entryName, CancellationToken cancellationToken)
+        {
+            var types = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (entry == null || !entry.HasData || entry.DataLength < 12) return types;
+
+            using (Stream source = entry.OpenDataRead())
+            {
+                Stream input = source;
+                FileStream decompressed = null;
+                string decompressedPath = null;
+                try
+                {
+                    if (Utils.IsRZFile(entryName))
+                    {
+                        decompressed = DecompressRZToTemporaryFile(source, out decompressedPath);
+                        input = decompressed;
+                    }
+                    Endian endian;
+                    long fileEnd;
+                    if (!TryReadP3DOuterHeader(input, out endian, out fileEnd)) return types;
+                    var typeNameCache = new Dictionary<uint, string[]>();
+                    while (input.Position + 12L <= fileEnd)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        long chunkStart = input.Position;
+                        uint typeId = input.ReadValueU32(endian);
+                        uint headerSize = input.ReadValueU32(endian);
+                        uint totalSize = input.ReadValueU32(endian);
+                        if (headerSize < 12U || totalSize < headerSize || totalSize > fileEnd - chunkStart)
+                            throw new FormatException("Invalid Pure3D root chunk header at offset " + chunkStart + ".");
+                        AddRcfRootTypeName(typeId, typeNameCache, types);
+                        input.Position = chunkStart + totalSize;
+                    }
+                    return types;
+                }
+                finally
+                {
+                    if (decompressed != null) decompressed.Dispose();
+                    DeleteTemporaryFileQuietly(decompressedPath);
+                }
+            }
+        }
+
+        private void CancelPendingRcfTreeBuild()
+        {
+            this._rcfTreeBuildGeneration++;
+            if (this._rcfTreeBuildTimer != null)
+                this._rcfTreeBuildTimer.Stop();
+            this._activeRcfTreeBuildSession = null;
+
+            CancellationTokenSource pending = this._rcfTreeBuildCts;
+            this._rcfTreeBuildCts = null;
+            if (pending != null)
+            {
+                try { pending.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
+
+        private async void StartRcfTreeBuildAsync(RcfArchiveItem selectItem)
+        {
+            if (this._rcfFile == null || this.nodeTreeView == null || this.nodeTreeView.IsDisposed)
+                return;
+
+            this.CancelPendingRcfTreeBuild();
+            int generation = this._rcfTreeBuildGeneration;
+            var cancellation = new CancellationTokenSource();
+            this._rcfTreeBuildCts = cancellation;
+            CancellationToken token = cancellation.Token;
+
+            // Preserve UI state before replacing the current tree with a lightweight progress row.
+            var previouslyExpanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectExpandedRcfFolderPaths(this.nodeTreeView.Nodes, previouslyExpanded);
+            var previouslyExpandedP3DEntries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectExpandedRcfP3DEntryNames(this.nodeTreeView.Nodes, previouslyExpandedP3DEntries);
+            object[] previouslySelectedTags = this.CaptureSelectedTreeTags();
+            object previouslyActiveTag = this.CaptureActiveTreeTag();
+
+            string languageCode = this._uiLanguage;
+            string query = this.searchTextBox == null ? string.Empty : this.searchTextBox.Text.Trim();
+            int sortIndex = this.sortComboBox == null ? 0 : this.sortComboBox.SelectedIndex;
+            string extensionFilter = this._archiveExtensionFilter ?? string.Empty;
+            string rootTypeFilter = this._archiveP3DNodeTypeFilter ?? string.Empty;
+
+            // Copy only the references on the UI thread. The worker builds immutable node specs;
+            // all WinForms TreeNode attachment still happens on this thread in bounded batches.
+            CementFile archiveSnapshot = this._rcfFile;
+            List<RcfArchiveItem> itemReferences = this._rcfItems == null
+                ? new List<RcfArchiveItem>() : this._rcfItems.ToList();
+            List<RcfTreeItemSnapshot> itemSnapshots = null;
+
+            this.nodeTreeView.BeginUpdate();
+            try
+            {
+                this.nodeTreeView.Nodes.Clear();
+                this.nodeTreeView.Nodes.Add(new TreeNode(UiLocalization.TranslateId(
+                    "tree.building", "Подготовка дерева ресурсов...", languageCode)));
+            }
+            finally { this.nodeTreeView.EndUpdate(); }
+            this.nodeTreeView.Invalidate();
+
+            Stopwatch timer = Stopwatch.StartNew();
+            double snapshotMilliseconds = 0.0;
+            try
+            {
+                // Yield once so the lightweight progress row paints before copying item metadata.
+                await Task.Yield();
+                if (this.IsDisposed || token.IsCancellationRequested || generation != this._rcfTreeBuildGeneration ||
+                    !ReferenceEquals(this._rcfFile, archiveSnapshot))
+                    return;
+
+                Stopwatch snapshotTimer = Stopwatch.StartNew();
+                itemSnapshots = this.CaptureRcfTreeItemSnapshots(itemReferences, rootTypeFilter);
+                snapshotTimer.Stop();
+                snapshotMilliseconds = snapshotTimer.Elapsed.TotalMilliseconds;
+
+                RcfTreeBuildResult result = await Task.Run(() => BuildRcfTreeNodeSpecs(
+                    itemSnapshots, query, sortIndex, extensionFilter, rootTypeFilter, token), token);
+
+                if (this.IsDisposed || this.nodeTreeView == null || this.nodeTreeView.IsDisposed ||
+                    token.IsCancellationRequested || generation != this._rcfTreeBuildGeneration ||
+                    !ReferenceEquals(this._rcfFile, archiveSnapshot))
+                    return;
+
+                timer.Stop();
+                WriteApplicationLog("RCF_TREE_SPECS_READY", string.Format(CultureInfo.InvariantCulture,
+                    "Подготовлены данные дерева RCF: entries={0}, nodes={1}, snapshotMs={2:0.0}, buildMs={3:0.0}, queryLength={4}, textureOnly=false",
+                    itemReferences.Count, result.Nodes.Count, snapshotMilliseconds, timer.Elapsed.TotalMilliseconds - snapshotMilliseconds, query.Length));
+
+                var session = new RcfTreeBuildSession
+                {
+                    Generation = generation,
+                    Specs = result.Nodes,
+                    PreviouslyExpandedFolders = previouslyExpanded,
+                    PreviouslyExpandedP3DEntries = previouslyExpandedP3DEntries,
+                    PreviouslySelectedTags = previouslySelectedTags,
+                    PreviouslyActiveTag = previouslyActiveTag,
+                    SelectItem = selectItem,
+                    SmartExpansionPending = this._rcfSmartExpansionPending,
+                    FolderNodes = new Dictionary<string, TreeNode>(StringComparer.OrdinalIgnoreCase),
+                    NodesByKey = new Dictionary<string, TreeNode>(StringComparer.OrdinalIgnoreCase),
+                    TreeNodesByItem = new Dictionary<RcfArchiveItem, TreeNode>(),
+                    AllNodes = new List<TreeNode>(result.Nodes.Count)
+                };
+                this._activeRcfTreeBuildSession = session;
+
+                if (result.Nodes.Count == 0)
+                {
+                    this.nodeTreeView.BeginUpdate();
+                    try { this.nodeTreeView.Nodes.Clear(); }
+                    finally { this.nodeTreeView.EndUpdate(); }
+                    this.CompleteRcfTreeBuild(session);
+                    return;
+                }
+
+                if (this._rcfTreeBuildTimer == null)
+                {
+                    this._rcfTreeBuildTimer = new System.Windows.Forms.Timer { Interval = 5 };
+                    this._rcfTreeBuildTimer.Tick += (sender, args) => this.ProcessRcfTreeBuildBatch();
+                }
+                this._rcfTreeBuildTimer.Start();
+            }
+            catch (OperationCanceledException)
+            {
+                // A newer search/filter/document request has superseded this tree build.
+            }
+            catch (Exception ex)
+            {
+                if (!this.IsDisposed && generation == this._rcfTreeBuildGeneration &&
+                    this.nodeTreeView != null && !this.nodeTreeView.IsDisposed)
+                {
+                    WriteApplicationLog("RCF_TREE_BUILD_FAILED", ex.ToString());
+                    this.nodeTreeView.BeginUpdate();
+                    try
+                    {
+                        this.nodeTreeView.Nodes.Clear();
+                        this.nodeTreeView.Nodes.Add(new TreeNode("Ошибка построения дерева: " + ex.Message));
+                    }
+                    finally { this.nodeTreeView.EndUpdate(); }
+                }
+            }
+            finally
+            {
+                if (ReferenceEquals(this._rcfTreeBuildCts, cancellation))
+                    this._rcfTreeBuildCts = null;
+                cancellation.Dispose();
+            }
+        }
+
+        private void ProcessRcfTreeBuildBatch()
+        {
+            RcfTreeBuildSession session = this._activeRcfTreeBuildSession;
+            if (session == null || session.Generation != this._rcfTreeBuildGeneration ||
+                this.IsDisposed || this.nodeTreeView == null || this.nodeTreeView.IsDisposed)
+            {
+                if (this._rcfTreeBuildTimer != null) this._rcfTreeBuildTimer.Stop();
+                this._activeRcfTreeBuildSession = null;
+                return;
+            }
+
+            const int BatchSize = 128;
+            int batchEnd = Math.Min(session.Specs.Count, session.NextSpecIndex + BatchSize);
+            this.nodeTreeView.BeginUpdate();
+            try
+            {
+                if (session.NextSpecIndex == 0)
+                    this.nodeTreeView.Nodes.Clear(); // Remove the temporary "building tree" row.
+                for (; session.NextSpecIndex < batchEnd; session.NextSpecIndex++)
+                {
+                    RcfTreeNodeSpec spec = session.Specs[session.NextSpecIndex];
+                    TreeNode node = new TreeNode(spec.Text)
+                    {
+                        Tag = spec.Tag,
+                        ImageKey = spec.ImageKey,
+                        SelectedImageKey = spec.ImageKey,
+                        ToolTipText = LocalizeTreeTooltip(spec.ToolTipText +
+                            (spec.IsArchiveFile ? FormatByteSize(spec.Size, this._uiLanguage) : string.Empty), spec.Tag, this._uiLanguage)
+                    };
+                    if (!string.IsNullOrEmpty(spec.LocalizationKey))
+                        node.Text = UiLocalization.TranslateId(spec.LocalizationKey, spec.Text, this._uiLanguage);
+
+                    TreeNode parent = null;
+                    if (!string.IsNullOrEmpty(spec.ParentKey) &&
+                        !session.NodesByKey.TryGetValue(spec.ParentKey, out parent))
+                    {
+                        // Specs are emitted parent-first; a missing parent indicates malformed
+                        // source paths. Skip only the orphaned row instead of corrupting the UI.
+                        continue;
+                    }
+
+                    if (parent != null) parent.Nodes.Add(node);
+                    else this.nodeTreeView.Nodes.Add(node);
+                    session.NodesByKey[spec.Key] = node;
+                    session.AllNodes.Add(node);
+
+                    RcfFolderItem folder = spec.Tag as RcfFolderItem;
+                    if (folder != null) session.FolderNodes[folder.Path] = node;
+                    RcfArchiveItem item = spec.Tag as RcfArchiveItem;
+                    if (item != null) session.TreeNodesByItem[item] = node;
+                }
+            }
+            finally { this.nodeTreeView.EndUpdate(); }
+
+            if (session.NextSpecIndex >= session.Specs.Count)
+            {
+                this._rcfTreeBuildTimer.Stop();
+                this.CompleteRcfTreeBuild(session);
+            }
+        }
+
+        private void CompleteRcfTreeBuild(RcfTreeBuildSession session)
+        {
+            if (session == null || this.IsDisposed || this.nodeTreeView == null || this.nodeTreeView.IsDisposed ||
+                session.Generation != this._rcfTreeBuildGeneration)
+                return;
+
+            if (session.SmartExpansionPending)
+            {
+                foreach (TreeNode root in this.nodeTreeView.Nodes)
+                    SmartExpandRcfFoldersUntilFiles(root);
+                this._rcfSmartExpansionPending = false;
+            }
+            else
+            {
+                foreach (string expandedPath in session.PreviouslyExpandedFolders.OrderBy(path => path.Count(ch => ch == '\\')))
+                {
+                    TreeNode folder;
+                    if (session.FolderNodes.TryGetValue(expandedPath, out folder)) folder.Expand();
+                }
+                foreach (KeyValuePair<RcfArchiveItem, TreeNode> pair in session.TreeNodesByItem)
+                {
+                    if (pair.Key != null && pair.Value != null && pair.Value.Nodes.Count > 0 &&
+                        session.PreviouslyExpandedP3DEntries.Contains(pair.Key.Name))
+                        pair.Value.Expand();
+                }
+            }
+
+            TreeNode preferredActiveNode = null;
+            if (session.SelectItem != null)
+                session.TreeNodesByItem.TryGetValue(session.SelectItem, out preferredActiveNode);
+            this.RestoreTreeSelectionFromNodeList(session.AllNodes, session.PreviouslySelectedTags,
+                session.PreviouslyActiveTag, preferredActiveNode);
+            if (preferredActiveNode != null)
+                this.propGrid.SelectedObject = session.SelectItem;
+
+            this.nodeTreeView.Invalidate();
+            this.UpdateMainToolbarState();
+            if (ReferenceEquals(this._activeRcfTreeBuildSession, session))
+                this._activeRcfTreeBuildSession = null;
+            WriteApplicationLog("RCF_TREE_BUILD_COMPLETE", string.Format(CultureInfo.InvariantCulture,
+                "Построение дерева RCF завершено: nodes={0}", session.AllNodes.Count));
+        }
+
+        private void RestoreTreeSelectionFromNodeList(IList<TreeNode> allNodes, object[] selectedTags,
+            object activeTag, TreeNode preferredActiveNode)
+        {
+            if (this.nodeTreeView == null || allNodes == null) return;
+            var restoredSelection = new List<TreeNode>();
+            if (selectedTags != null && selectedTags.Length > 0)
+            {
+                foreach (TreeNode node in allNodes)
+                {
+                    if (node.Tag == null) continue;
+                    foreach (object tag in selectedTags)
+                    {
+                        if (TreeTagsMatch(tag, node.Tag))
+                        {
+                            restoredSelection.Add(node);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            TreeNode activeNode = preferredActiveNode != null && preferredActiveNode.TreeView == this.nodeTreeView
+                ? preferredActiveNode
+                : allNodes.FirstOrDefault(node => node.Tag != null && TreeTagsMatch(activeTag, node.Tag));
+            if (preferredActiveNode != null && preferredActiveNode.TreeView == this.nodeTreeView &&
+                !restoredSelection.Contains(preferredActiveNode))
+                restoredSelection.Add(preferredActiveNode);
+            this.nodeTreeView.SetSelectedNodes(restoredSelection, activeNode);
+        }
+
+        private List<RcfTreeItemSnapshot> CaptureRcfTreeItemSnapshots(IList<RcfArchiveItem> items, string rootTypeFilter)
+        {
+            var snapshots = new List<RcfTreeItemSnapshot>(items == null ? 0 : items.Count);
+            for (int i = 0; i < (items == null ? 0 : items.Count); i++)
+            {
+                RcfArchiveItem item = items[i];
+                if (item == null) continue;
+                string name = item.Name;
+                string extension = GetRcfExtension(name);
+                bool canContainP3D = name.EndsWith(".p3d", StringComparison.OrdinalIgnoreCase) || Utils.IsRZFile(name);
+                bool parseAttempted = item.ParseAttempted;
+                bool hasParsedFile = parseAttempted && item.ParsedFile != null;
+                var rootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrEmpty(rootTypeFilter) && item.EmbeddedP3DRootTypes != null)
+                    foreach (string rootType in item.EmbeddedP3DRootTypes) rootTypes.Add(rootType);
+
+                var snapshot = new RcfTreeItemSnapshot
+                {
+                    TreeId = i,
+                    Item = item,
+                    Name = name,
+                    Size = item.Size,
+                    Extension = extension,
+                    Format = canContainP3D ? "Pure3D" : (string.IsNullOrEmpty(extension)
+                        ? "Бинарные данные" : extension.TrimStart('.').ToUpperInvariant()),
+                    CanContainP3D = canContainP3D,
+                    ParseAttempted = parseAttempted,
+                    HasParsedFile = hasParsedFile,
+                    RootTypes = rootTypes,
+                    ParsedRoots = new List<RcfTreeRootSnapshot>()
+                };
+
+                if (hasParsedFile && item.ParsedFile.Nodes != null)
+                {
+                    int rootIndex = 0;
+                    foreach (BaseNode root in item.ParsedFile.Nodes)
+                    {
+                        if (root == null) continue;
+                        snapshot.ParsedRoots.Add(new RcfTreeRootSnapshot
+                        {
+                            RootIndex = rootIndex++,
+                            Node = root,
+                            TypeName = root.GetType().Name,
+                            Text = root.ToString(),
+                            ImageKey = GetBaseNodeTreeImageKey(root),
+                            HasChildren = root.Children != null && root.Children.Count > 0
+                        });
+                    }
+                }
+                snapshots.Add(snapshot);
+            }
+            return snapshots;
+        }
+
+        private static RcfTreeBuildResult BuildRcfTreeNodeSpecs(IList<RcfTreeItemSnapshot> items, string query,
+            int sortIndex, string extensionFilter, string rootTypeFilter, CancellationToken token)
+        {
+            var specs = new List<RcfTreeNodeSpec>();
+            var folderKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var eligibleItems = new List<RcfTreeItemSnapshot>();
+            query = (query ?? string.Empty).Trim();
+
+            for (int i = 0; i < (items == null ? 0 : items.Count); i++)
+            {
+                if ((i & 255) == 0) token.ThrowIfCancellationRequested();
+                RcfTreeItemSnapshot snapshot = items[i];
+                if (snapshot == null) continue;
+                if (!string.IsNullOrEmpty(query) && snapshot.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                if (!string.IsNullOrEmpty(rootTypeFilter))
+                {
+                    if (!snapshot.RootTypes.Contains(rootTypeFilter)) continue;
+                }
+                else if (!string.IsNullOrEmpty(extensionFilter))
+                {
+                    if (extensionFilter == NoExtensionFilterToken)
+                    {
+                        if (!string.IsNullOrEmpty(snapshot.Extension)) continue;
+                    }
+                    else if (!string.Equals(snapshot.Extension, extensionFilter, StringComparison.OrdinalIgnoreCase)) continue;
+                }
+                eligibleItems.Add(snapshot);
+            }
+
+            switch (sortIndex)
+            {
+                case 1: eligibleItems = eligibleItems.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList(); break;
+                case 2: eligibleItems = eligibleItems.OrderByDescending(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList(); break;
+                case 3: eligibleItems = eligibleItems.OrderByDescending(item => item.Size).ToList(); break;
+                case 4: eligibleItems = eligibleItems.OrderBy(item => item.Size).ToList(); break;
+                case 7: eligibleItems = eligibleItems.OrderBy(item => item.Extension, StringComparer.OrdinalIgnoreCase).ToList(); break;
+            }
+
+            string rcfPathPrefix = "Путь в RCF: ";
+            string depthPrefix = "Глубина: ";
+            string levelSuffix = " уровень";
+            string loadingKey = "tree.loading";
+            string loadingP3DKey = "tree.loadingP3D";
+            foreach (RcfTreeItemSnapshot item in eligibleItems)
+            {
+                token.ThrowIfCancellationRequested();
+                string[] segments = SplitArchivePath(item.Name);
+                if (segments.Length == 0) segments = new[] { item.Name };
+                string parentKey = null;
+                string currentPath = string.Empty;
+                for (int depth = 0; depth < segments.Length - 1; depth++)
+                {
+                    currentPath = currentPath.Length == 0 ? segments[depth] : currentPath + "\\" + segments[depth];
+                    string folderKey = "folder:" + currentPath;
+                    if (folderKeys.Add(currentPath))
+                    {
+                        specs.Add(new RcfTreeNodeSpec
+                        {
+                            Key = folderKey,
+                            ParentKey = parentKey,
+                            Text = segments[depth],
+                            Tag = new RcfFolderItem(segments[depth], currentPath),
+                            ImageKey = "folder",
+                            ToolTipText = rcfPathPrefix + currentPath + "\n" + depthPrefix + (depth + 1) + levelSuffix
+                        });
+                    }
+                    parentKey = folderKey;
+                }
+
+                string itemKey = "item:" + item.TreeId.ToString(CultureInfo.InvariantCulture);
+                specs.Add(new RcfTreeNodeSpec
+                {
+                    Key = itemKey,
+                    ParentKey = parentKey,
+                    Text = segments[segments.Length - 1],
+                    Tag = item.Item,
+                    ImageKey = GetRcfTreeImageKeyFromExtension(item.Extension),
+                    ToolTipText = rcfPathPrefix + item.Name + "\n" + depthPrefix + Math.Max(0, segments.Length - 1) + levelSuffix + "\n" +
+                        item.Format + " • ",
+                    IsArchiveFile = true,
+                    Size = item.Size
+                });
+
+                if (item.CanContainP3D && !item.ParseAttempted)
+                {
+                    specs.Add(new RcfTreeNodeSpec
+                    {
+                        Key = itemKey + ":loading",
+                        ParentKey = itemKey,
+                        Text = "Загрузка P3D...",
+                        LocalizationKey = loadingP3DKey,
+                        Tag = null,
+                        ImageKey = string.Empty,
+                        ToolTipText = string.Empty
+                    });
+                }
+                else if (item.HasParsedFile)
+                {
+                    foreach (RcfTreeRootSnapshot root in item.ParsedRoots)
+                    {
+                        if (!string.IsNullOrEmpty(rootTypeFilter) &&
+                            !string.Equals(root.TypeName, rootTypeFilter, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        string rootKey = itemKey + ":root:" + root.RootIndex.ToString(CultureInfo.InvariantCulture);
+                        specs.Add(new RcfTreeNodeSpec
+                        {
+                            Key = rootKey,
+                            ParentKey = itemKey,
+                            Text = root.Text,
+                            Tag = root.Node,
+                            ImageKey = root.ImageKey,
+                            ToolTipText = root.TypeName + "\n" + root.Text + "\nГлубина P3D: " + segments.Length
+                        });
+                        if (root.HasChildren)
+                        {
+                            specs.Add(new RcfTreeNodeSpec
+                            {
+                                Key = rootKey + ":loading",
+                                ParentKey = rootKey,
+                                Text = "Загрузка...",
+                                LocalizationKey = loadingKey,
+                                Tag = null,
+                                ImageKey = string.Empty,
+                                ToolTipText = string.Empty
+                            });
+                        }
+                    }
+                }
+            }
+            return new RcfTreeBuildResult { Nodes = specs };
+        }
+
+        private static string GetRcfTreeImageKeyFromExtension(string extension)
+        {
+            if (extension == ".p3d") return "p3d";
+            if (extension == ".rz" || extension == ".p3d.rz") return "rz";
+            if (extension == ".dds" || extension == ".png" || extension == ".tga" || extension == ".bmp" || extension == ".jpg" || extension == ".jpeg" || extension == ".tif" || extension == ".tiff") return "texture";
+            if (extension == ".anm" || extension == ".anim") return "animation";
+            return "file";
+        }
+
+        private bool MatchesArchiveExtensionFilter(RcfArchiveItem item)
+        {
+            if (string.IsNullOrEmpty(this._archiveExtensionFilter)) return true;
+            string extension = GetRcfExtension(item == null ? string.Empty : item.Name);
+            if (this._archiveExtensionFilter == NoExtensionFilterToken) return string.IsNullOrEmpty(extension);
+            return string.Equals(extension, this._archiveExtensionFilter, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void RefreshRcfTree(RcfArchiveItem selectItem = null)
+        {
+            if (this._rcfFile == null || this.nodeTreeView == null) return;
+            if (this._onlyTextures)
+                this.CancelPendingRcfTreeBuild();
+            if (this._onlyTextures && this.HasUnscannedRcfTextureEntries())
+            {
+                this.StartRcfTextureScanAsync();
+                return;
+            }
+            if (!this._onlyTextures && this._rcfTextureScanTask != null)
+                this.CancelPendingRcfTextureScan();
+
+            if (!this._onlyTextures)
+            {
+                this.StartRcfTreeBuildAsync(selectItem);
+                return;
+            }
+
+            HashSet<string> previouslyExpanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectExpandedRcfFolderPaths(this.nodeTreeView.Nodes, previouslyExpanded);
+            HashSet<string> previouslyExpandedP3DEntries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectExpandedRcfP3DEntryNames(this.nodeTreeView.Nodes, previouslyExpandedP3DEntries);
+            object[] previouslySelectedTags = this.CaptureSelectedTreeTags();
+            object previouslyActiveTag = this.CaptureActiveTreeTag();
+            SendMessage(this.nodeTreeView.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+            this.nodeTreeView.BeginUpdate();
+            this.nodeTreeView.Nodes.Clear();
+
+            IEnumerable<RcfArchiveItem> items = this._rcfItems;
+            string query = this.searchTextBox == null ? string.Empty : this.searchTextBox.Text.Trim();
+            this._visibleRcfTextureHits = new Dictionary<RcfArchiveItem, List<RcfTextureHitInfo>>();
+            var embeddedTextureRows = new List<KeyValuePair<RcfArchiveItem, RcfTextureHitInfo>>();
+            if (this._onlyTextures)
+            {
+                // The filter displays texture records themselves, not the P3D/RZ files
+                // that contain them. The lightweight index scanner reads chunk headers
+                // and texture names only; it skips bitmap payloads without deserializing
+                // full TextureData arrays into memory.
+                this.ReleaseUnneededRcfParseCaches();
+                var directImageMatches = new List<RcfArchiveItem>();
+                foreach (RcfArchiveItem item in this._rcfItems)
+                {
+                    if (item == null) continue;
+                    string extension = GetRcfExtension(item.Name);
+                    if (IsImageExtension(extension))
+                    {
+                        if (string.IsNullOrEmpty(query) || item.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
+                            directImageMatches.Add(item);
+                        continue;
+                    }
+                    if (!item.CanContainP3D) continue;
+
+                    List<RcfTextureHitInfo> allHits = this.GetRcfTextureHits(item);
+                    bool sourceMatches = !string.IsNullOrEmpty(query) &&
+                        item.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+                    List<RcfTextureHitInfo> visibleHits = allHits
+                        .Where(hit => sourceMatches || TextureHitMatches(hit, query))
+                        .ToList();
+                    if (visibleHits.Count > 0)
+                    {
+                        this._visibleRcfTextureHits[item] = visibleHits;
+                        foreach (RcfTextureHitInfo hit in visibleHits)
+                            embeddedTextureRows.Add(new KeyValuePair<RcfArchiveItem, RcfTextureHitInfo>(item, hit));
+                    }
+                }
+                items = directImageMatches;
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(query))
+                    items = items.Where(item => item.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0);
+                if (!string.IsNullOrEmpty(this._archiveP3DNodeTypeFilter))
+                    items = items.Where(item => item.EmbeddedP3DRootTypes != null &&
+                        item.EmbeddedP3DRootTypes.Contains(this._archiveP3DNodeTypeFilter));
+                else if (!string.IsNullOrEmpty(this._archiveExtensionFilter))
+                    items = items.Where(item => this.MatchesArchiveExtensionFilter(item));
+            }
+
+            switch (this.sortComboBox == null ? 0 : this.sortComboBox.SelectedIndex)
+            {
+                case 1: items = items.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase); break;
+                case 2: items = items.OrderByDescending(item => item.Name, StringComparer.OrdinalIgnoreCase); break;
+                case 3: items = items.OrderByDescending(item => item.Size); break;
+                case 4: items = items.OrderBy(item => item.Size); break;
+                case 7: items = items.OrderBy(item => item.Extension, StringComparer.OrdinalIgnoreCase); break;
+            }
+
+            var folderNodes = new Dictionary<string, TreeNode>(StringComparer.OrdinalIgnoreCase);
+            var treeNodesByItem = new Dictionary<RcfArchiveItem, TreeNode>();
+            foreach (RcfArchiveItem item in items)
+            {
+                string[] segments = SplitArchivePath(item.Name);
+                if (segments.Length == 0) segments = new[] { item.Name };
+                TreeNode parent = null;
+                string currentPath = string.Empty;
+                for (int i = 0; i < segments.Length - 1; i++)
+                {
+                    currentPath = currentPath.Length == 0 ? segments[i] : currentPath + "\\" + segments[i];
+                    TreeNode folder;
+                    if (!folderNodes.TryGetValue(currentPath, out folder))
+                    {
+                        folder = new TreeNode(segments[i])
+                        {
+                            Tag = new RcfFolderItem(segments[i], currentPath),
+                            ImageKey = "folder", SelectedImageKey = "folder",
+                            ToolTipText = UiLocalization.TranslateId("tree.tooltip.rcfPathPrefix", "Путь в RCF: ", this._uiLanguage) + currentPath + "\n" + UiLocalization.TranslateId("tree.tooltip.depthPrefix", "Глубина: ", this._uiLanguage) + (i + 1) + UiLocalization.TranslateId("tree.tooltip.levelSuffix", " уровень", this._uiLanguage)
+                        };
+                        if (parent == null) this.nodeTreeView.Nodes.Add(folder); else parent.Nodes.Add(folder);
+                        folderNodes.Add(currentPath, folder);
+                    }
+                    parent = folder;
+                }
+
+                var fileNode = new TreeNode(segments[segments.Length - 1])
+                {
+                    Tag = item,
+                    ImageKey = GetRcfTreeImageKey(item),
+                    SelectedImageKey = GetRcfTreeImageKey(item),
+                    ToolTipText = UiLocalization.TranslateId("tree.tooltip.rcfPathPrefix", "Путь в RCF: ", this._uiLanguage) + item.Name + "\n" + UiLocalization.TranslateId("tree.tooltip.depthPrefix", "Глубина: ", this._uiLanguage) + Math.Max(0, segments.Length - 1) + UiLocalization.TranslateId("tree.tooltip.levelSuffix", " уровень", this._uiLanguage) + "\n" + item.Format + " • " + FormatByteSize(item.Size, this._uiLanguage)
+                };
+                if (!this._onlyTextures && item.CanContainP3D && !item.ParseAttempted)
+                    fileNode.Nodes.Add(new TreeNode { Text = UiLocalization.TranslateId("tree.loadingP3D", "Загрузка P3D...", this._uiLanguage), Tag = null });
+                else if (!this._onlyTextures && item.ParseAttempted && item.ParsedFile != null)
+                    this.AddPure3DRootNodes(fileNode, item.ParsedFile, this._archiveP3DNodeTypeFilter);
+                if (parent == null) this.nodeTreeView.Nodes.Add(fileNode); else parent.Nodes.Add(fileNode);
+                treeNodesByItem[item] = fileNode;
+            }
+
+            if (this._onlyTextures && embeddedTextureRows.Count > 0)
+            {
+                IEnumerable<KeyValuePair<RcfArchiveItem, RcfTextureHitInfo>> textureRows = embeddedTextureRows;
+                switch (this.sortComboBox == null ? 0 : this.sortComboBox.SelectedIndex)
+                {
+                    case 1: textureRows = textureRows.OrderBy(row => row.Value.SortText, StringComparer.OrdinalIgnoreCase); break;
+                    case 2: textureRows = textureRows.OrderByDescending(row => row.Value.SortText, StringComparer.OrdinalIgnoreCase); break;
+                    case 3: textureRows = textureRows.OrderByDescending(row => row.Value.PixelCount); break;
+                    case 4: textureRows = textureRows.OrderBy(row => row.Value.PixelCount); break;
+                    case 7: textureRows = textureRows.OrderBy(row => row.Value.TypeName, StringComparer.OrdinalIgnoreCase); break;
+                    default: textureRows = textureRows.OrderBy(row => row.Key.Name, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(row => row.Value.SortText, StringComparer.OrdinalIgnoreCase); break;
+                }
+
+                foreach (KeyValuePair<RcfArchiveItem, RcfTextureHitInfo> row in textureRows)
+                {
+                    string[] sourceSegments = SplitArchivePath(row.Key.Name);
+                    int folderCount = Math.Max(0, sourceSegments.Length - 1);
+                    TreeNode parent = this.GetOrCreateRcfFolderNode(sourceSegments, folderCount, folderNodes);
+                    var searchHit = new RcfTextureSearchHit(row.Key, row.Value.PathIndices,
+                        row.Value.DisplayText, row.Value.TypeName);
+                    string sourceName = sourceSegments.Length == 0 ? row.Key.Name : sourceSegments[sourceSegments.Length - 1];
+                    var textureNode = new TreeNode(row.Value.DisplayText)
+                    {
+                        Tag = searchHit,
+                        ImageKey = "texture",
+                        SelectedImageKey = "texture",
+                        ToolTipText = row.Value.TypeName + "\n" + UiLocalization.TranslateId("tree.tooltip.sourcePrefix", "Источник: ", this._uiLanguage) + row.Key.Name +
+                            "\n" + UiLocalization.TranslateId("tree.tooltip.containerPrefix", "Контейнер: ", this._uiLanguage) + sourceName +
+                            (row.Value.PixelCount > 0 ? "\n" + UiLocalization.TranslateId("tree.tooltip.pixelCountPrefix", "Пикселей: ", this._uiLanguage) + row.Value.PixelCount.ToString("N0") : string.Empty)
+                    };
+                    if (parent == null) this.nodeTreeView.Nodes.Add(textureNode); else parent.Nodes.Add(textureNode);
+                }
+            }
+
+            this.nodeTreeView.EndUpdate();
+            SendMessage(this.nodeTreeView.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+
+            if (this._onlyTextures)
+            {
+                // Reveal folder paths until matching archive entries are visible, but never
+                // ExpandAll: doing so fires lazy-load handlers for every P3D in the archive.
+                foreach (TreeNode root in this.nodeTreeView.Nodes)
+                    SmartExpandRcfFoldersUntilFiles(root);
+                this._rcfSmartExpansionPending = false;
+            }
+            else if (this._rcfSmartExpansionPending)
+            {
+                foreach (TreeNode root in this.nodeTreeView.Nodes)
+                    SmartExpandRcfFoldersUntilFiles(root);
+                this._rcfSmartExpansionPending = false;
+            }
+            else
+            {
+                foreach (string expandedPath in previouslyExpanded.OrderBy(path => path.Count(ch => ch == '\\')))
+                {
+                    TreeNode folder;
+                    if (folderNodes.TryGetValue(expandedPath, out folder)) folder.Expand();
+                }
+                // Keep expanded archive containers expanded across a tree rebuild. Restoring only
+                // RCF folders left opened .p3d/.p3d.rz nodes collapsed after filter index updates.
+                foreach (KeyValuePair<RcfArchiveItem, TreeNode> pair in treeNodesByItem)
+                {
+                    if (pair.Key != null && pair.Value != null && pair.Value.Nodes.Count > 0 &&
+                        previouslyExpandedP3DEntries.Contains(pair.Key.Name))
+                        pair.Value.Expand();
+                }
+            }
+
+            this.nodeTreeView.Invalidate();
+
+            TreeNode preferredActiveNode = null;
+            if (selectItem != null)
+                treeNodesByItem.TryGetValue(selectItem, out preferredActiveNode);
+            this.RestoreTreeSelection(previouslySelectedTags, previouslyActiveTag, preferredActiveNode);
+            if (preferredActiveNode != null)
+                this.propGrid.SelectedObject = selectItem;
+            this.ApplyTreeNodeLocalization(this.nodeTreeView.Nodes, this._uiLanguage);
+            this.UpdateMainToolbarState();
+        }
+
+        // RCF metadata is not guaranteed to contain a normal Windows path string.
+        // Some archives keep NUL terminators/padding in Metadata.Name. System.IO.Path
+        // throws ArgumentException for such strings, so never pass untrusted archive
+        // names directly to Path.GetExtension.
+        private static string CleanRcfName(string value)
+        {
+            return (value ?? string.Empty).Replace("\0", string.Empty);
+        }
+
+        private static string GetRcfExtension(string value)
+        {
+            string normalized = CleanRcfName(value).Replace('/', '\\');
+            int separator = normalized.LastIndexOf('\\');
+            string leaf = separator >= 0 ? normalized.Substring(separator + 1) : normalized;
+            if (leaf.EndsWith(".p3d.rz", StringComparison.OrdinalIgnoreCase)) return ".p3d.rz";
+            int dot = normalized.LastIndexOf('.');
+            return dot > separator ? normalized.Substring(dot).ToLowerInvariant() : string.Empty;
+        }
+
+        private static string[] SplitArchivePath(string path)
+        {
+            string normalized = CleanRcfName(path).TrimEnd(' ', '\t').Replace('/', '\\');
+            normalized = normalized.TrimStart('\\');
+            string[] parts = normalized.Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(part => part != ".")
+                .Select(part => part == ".." ? "__parent__" : part)
+                .ToArray();
+            return parts;
+        }
+
+        private TreeNode GetOrCreateRcfFolderNode(string[] segments, int segmentCount, Dictionary<string, TreeNode> folderNodes)
+        {
+            TreeNode parent = null;
+            string currentPath = string.Empty;
+            int count = Math.Min(segmentCount, segments == null ? 0 : segments.Length);
+            for (int i = 0; i < count; i++)
+            {
+                string segment = segments[i];
+                currentPath = currentPath.Length == 0 ? segment : currentPath + "\\" + segment;
+                TreeNode folder;
+                if (!folderNodes.TryGetValue(currentPath, out folder))
+                {
+                    folder = new TreeNode(segment)
+                    {
+                        Tag = new RcfFolderItem(segment, currentPath),
+                        ImageKey = "folder", SelectedImageKey = "folder",
+                        ToolTipText = UiLocalization.TranslateId("tree.tooltip.rcfPathPrefix", "Путь в RCF: ", this._uiLanguage) + currentPath + "\n" + UiLocalization.TranslateId("tree.tooltip.depthPrefix", "Глубина: ", this._uiLanguage) + (i + 1) + UiLocalization.TranslateId("tree.tooltip.levelSuffix", " уровень", this._uiLanguage)
+                    };
+                    if (parent == null) this.nodeTreeView.Nodes.Add(folder); else parent.Nodes.Add(folder);
+                    folderNodes.Add(currentPath, folder);
+                }
+                parent = folder;
+            }
+            return parent;
+        }
+
+        private void CollectExpandedRcfFolderPaths(TreeNodeCollection nodes, HashSet<string> result)
+        {
+            if (nodes == null || result == null) return;
+            foreach (TreeNode node in nodes)
+            {
+                RcfFolderItem folder = node.Tag as RcfFolderItem;
+                if (folder != null && node.IsExpanded) result.Add(folder.Path);
+                if (node.Nodes.Count > 0) CollectExpandedRcfFolderPaths(node.Nodes, result);
+            }
+        }
+
+        private void CollectExpandedRcfP3DEntryNames(TreeNodeCollection nodes, HashSet<string> result)
+        {
+            if (nodes == null || result == null) return;
+            foreach (TreeNode node in nodes)
+            {
+                RcfArchiveItem item = node.Tag as RcfArchiveItem;
+                if (item != null && item.CanContainP3D && node.IsExpanded)
+                    result.Add(item.Name);
+                if (node.Nodes.Count > 0) CollectExpandedRcfP3DEntryNames(node.Nodes, result);
+            }
+        }
+
+        // Expand a folder path only until at least one file is visible. Avoid opening
+        // all sibling folders or any P3D's internal node hierarchy automatically.
+        private static void SmartExpandRcfFoldersUntilFiles(TreeNode node)
+        {
+            if (node == null || !(node.Tag is RcfFolderItem) || node.Nodes.Count == 0) return;
+            node.Expand();
+            bool hasDirectLeaves = node.Nodes.Cast<TreeNode>().Any(child => !(child.Tag is RcfFolderItem));
+            if (hasDirectLeaves) return;
+            foreach (TreeNode child in node.Nodes)
+                if (child.Tag is RcfFolderItem) SmartExpandRcfFoldersUntilFiles(child);
+        }
+
+        private static string GetRcfTreeImageKey(RcfArchiveItem item)
+        {
+            if (item == null) return "file";
+            string extension = GetRcfExtension(item.Name);
+            if (extension == ".p3d") return "p3d";
+            if (extension == ".rz" || extension == ".p3d.rz") return "rz";
+            if (extension == ".dds" || extension == ".png" || extension == ".tga" || extension == ".bmp" || extension == ".jpg" || extension == ".jpeg" || extension == ".tif" || extension == ".tiff") return "texture";
+            if (extension == ".anm" || extension == ".anim") return "animation";
+            return "file";
+        }
+
+        private static string GetBaseNodeTreeImageKey(BaseNode node)
+        {
+            if (node == null) return "unknown";
+            string name = node.GetType().Name;
+            string lower = name.ToLowerInvariant();
+            if (lower.Contains("unknown") || lower.Contains("opaque") || lower.Contains("rawpayload")) return "unknown";
+            if (lower.Contains("texture") || lower.Contains("image")) return "texture";
+            if (lower.Contains("animation") || lower.Contains("channel") || lower.Contains("morph")) return "animation";
+            if (lower.Contains("skeleton") || lower.Contains("joint") || lower.Contains("bone")) return "skeleton";
+            if (lower.Contains("geometry") || lower.Contains("polyskin") || lower.Contains("primitive") || lower.Contains("compositedrawable")) return "p3d";
+            return "section";
+        }
+
+        private static string FormatByteSize(long size, string languageCode = "ru")
+        {
+            if (size < 0) return UiLocalization.TranslateId("unit.unknownSize", "размер неизвестен", languageCode);
+            if (size < 1024) return size.ToString() + " " + UiLocalization.TranslateId("unit.byte", "Б", languageCode);
+            if (size < 1024 * 1024) return (size / 1024.0).ToString("0.##") + " " + UiLocalization.TranslateId("unit.kilobyte", "КБ", languageCode);
+            return (size / (1024.0 * 1024.0)).ToString("0.##") + " " + UiLocalization.TranslateId("unit.megabyte", "МБ", languageCode);
+        }
+
+        private static bool IsImageExtension(string extension)
+        {
+            switch ((extension ?? string.Empty).ToLowerInvariant())
+            {
+                case ".dds": case ".png": case ".tga": case ".bmp":
+                case ".jpg": case ".jpeg": case ".tif": case ".tiff": case ".gif":
+                    return true;
+                default: return false;
+            }
+        }
+
+        private string GetRcfTextureIndexCachePath()
+        {
+            return GetRcfTextureIndexCachePath(this._currentFilePath);
+        }
+
+        private static string GetRcfTextureIndexCachePath(string sourcePath)
+        {
+            if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath)) return null;
+            try
+            {
+                string fullPath = Path.GetFullPath(sourcePath).ToUpperInvariant();
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(fullPath);
+                using (SHA256 sha = SHA256.Create())
+                {
+                    string key = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", string.Empty);
+                    string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "PrototypeUltimateTool", "TextureIndex");
+                    return Path.Combine(directory, key + ".idx");
+                }
+            }
+            catch { return null; }
+        }
+
+        private void LoadRcfTextureIndexCache()
+        {
+            ApplyRcfTextureIndexCache(this._rcfItems,
+                ReadRcfTextureIndexCache(this._currentFilePath, this._rcfItems, CancellationToken.None));
+        }
+
+        private static List<RcfTextureCacheItem> ReadRcfTextureIndexCache(string archivePath,
+            IList<RcfArchiveItem> items, CancellationToken token)
+        {
+            string cachePath = GetRcfTextureIndexCachePath(archivePath);
+            if (cachePath == null || items == null || !File.Exists(cachePath)) return null;
+            try
+            {
+                FileInfo archiveInfo = new FileInfo(archivePath);
+                string fullPath = Path.GetFullPath(archivePath);
+                var pending = new List<RcfTextureCacheItem>();
+                using (FileStream fs = File.OpenRead(cachePath))
+                using (BinaryReader reader = new BinaryReader(fs, System.Text.Encoding.UTF8))
+                {
+                    if (reader.ReadInt32() != 0x32585450) return null; // PTX2
+                    if (!string.Equals(reader.ReadString(), fullPath, StringComparison.OrdinalIgnoreCase)) return null;
+                    if (reader.ReadInt64() != archiveInfo.Length || reader.ReadInt64() != archiveInfo.LastWriteTimeUtc.Ticks) return null;
+                    int itemCount = reader.ReadInt32();
+                    if (itemCount != items.Count || itemCount < 0 || itemCount > 2000000) return null;
+
+                    for (int i = 0; i < itemCount; i++)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        string name = reader.ReadString();
+                        uint hash = reader.ReadUInt32();
+                        bool attempted = reader.ReadBoolean();
+                        string error = null;
+                        var hits = new List<RcfTextureHitInfo>();
+                        if (attempted)
+                        {
+                            error = reader.ReadString();
+                            int hitCount = reader.ReadInt32();
+                            if (hitCount < 0 || hitCount > 1000000) return null;
+                            for (int j = 0; j < hitCount; j++)
+                            {
+                                if ((j & 255) == 0) token.ThrowIfCancellationRequested();
+                                int pathLength = reader.ReadInt32();
+                                if (pathLength < 0 || pathLength > 128) return null;
+                                var indices = new int[pathLength];
+                                for (int k = 0; k < pathLength; k++) indices[k] = reader.ReadInt32();
+                                string display = reader.ReadString();
+                                string typeName = reader.ReadString();
+                                string sortName = reader.ReadString();
+                                long pixels = reader.ReadInt64();
+                                hits.Add(new RcfTextureHitInfo(indices, display, typeName, sortName, pixels));
+                            }
+                        }
+                        RcfArchiveItem current = items[i];
+                        uint currentHash = current.Entry != null ? current.Entry.Hash : 0;
+                        if (!string.Equals(name, current.Name, StringComparison.Ordinal) || hash != currentHash) return null;
+                        pending.Add(new RcfTextureCacheItem(attempted, error, hits));
+                    }
+                    if (fs.Position != fs.Length) return null;
+                }
+                return pending;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch
+            {
+                // A missing, old or truncated sidecar is non-fatal; scan from source chunks.
+                return null;
+            }
+        }
+
+        private static void ApplyRcfTextureIndexCache(IList<RcfArchiveItem> items, IList<RcfTextureCacheItem> pending)
+        {
+            if (items == null || pending == null || pending.Count != items.Count) return;
+            for (int i = 0; i < pending.Count; i++)
+            {
+                RcfArchiveItem item = items[i];
+                item.TextureScanAttempted = pending[i].Attempted;
+                item.TextureScanError = pending[i].Error;
+                item.TextureHits = pending[i].Attempted ? pending[i].Hits : null;
+            }
+        }
+
+        private void SaveRcfTextureIndexCache()
+        {
+            string cachePath = this.GetRcfTextureIndexCachePath();
+            if (cachePath == null || this._rcfItems == null) return;
+            string tempPath = null;
+            try
+            {
+                FileInfo archiveInfo = new FileInfo(this._currentFilePath);
+                string fullPath = Path.GetFullPath(this._currentFilePath);
+                string directory = Path.GetDirectoryName(cachePath);
+                Directory.CreateDirectory(directory);
+                tempPath = cachePath + ".tmp";
+                using (FileStream fs = File.Create(tempPath))
+                using (BinaryWriter writer = new BinaryWriter(fs, System.Text.Encoding.UTF8))
+                {
+                    writer.Write(0x32585450); // PTX2
+                    writer.Write(fullPath);
+                    writer.Write(archiveInfo.Length);
+                    writer.Write(archiveInfo.LastWriteTimeUtc.Ticks);
+                    writer.Write(this._rcfItems.Count);
+                    foreach (RcfArchiveItem item in this._rcfItems)
+                    {
+                        writer.Write(item.Name ?? string.Empty);
+                        writer.Write(item.Entry != null ? item.Entry.Hash : 0U);
+                        writer.Write(item.TextureScanAttempted);
+                        if (!item.TextureScanAttempted) continue;
+                        writer.Write(item.TextureScanError ?? string.Empty);
+                        List<RcfTextureHitInfo> hits = item.TextureHits ?? new List<RcfTextureHitInfo>();
+                        writer.Write(hits.Count);
+                        foreach (RcfTextureHitInfo hit in hits)
+                        {
+                            writer.Write(hit.PathIndices.Length);
+                            foreach (int index in hit.PathIndices) writer.Write(index);
+                            writer.Write(hit.DisplayText ?? string.Empty);
+                            writer.Write(hit.TypeName ?? string.Empty);
+                            writer.Write(hit.SortText ?? string.Empty);
+                            writer.Write(hit.PixelCount);
+                        }
+                    }
+                }
+                if (File.Exists(cachePath)) File.Delete(cachePath);
+                File.Move(tempPath, cachePath);
+            }
+            catch
+            {
+                // Cache failures must never block archive opening or editing.
+                try { if (tempPath != null && File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            }
+        }
+
+        private bool HasUnscannedRcfTextureEntries()
+        {
+            return this._rcfItems.Any(item => item != null && item.CanContainP3D && !item.TextureScanAttempted);
+        }
+
+        private void CancelPendingRcfTextureScan()
+        {
+            this._rcfTextureScanGeneration++;
+            CancellationTokenSource previous = this._rcfTextureScanCts;
+            this._rcfTextureScanCts = null;
+            // Keep the task reference until the canceled worker really exits. Otherwise a
+            // quick re-enable can start a second scan while the first is still parsing a
+            // large RZ file, recreating the very memory spike this path is meant to prevent.
+            if (previous != null)
+            {
+                try { previous.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
+
+        private void ShowRcfTextureScanStatus()
+        {
+            if (this.nodeTreeView == null || this.nodeTreeView.IsDisposed) return;
+            this.nodeTreeView.BeginUpdate();
+            this.nodeTreeView.Nodes.Clear();
+            this.nodeTreeView.Nodes.Add(new TreeNode("Сканирование вложенных P3D/RZ на наличие текстур…"));
+            this.nodeTreeView.EndUpdate();
+            this.nodeTreeView.Invalidate();
+        }
+
+        private void StartRcfTextureScanAsync()
+        {
+            // Search text can change several times while a scan is in progress. Keep the
+            // single worker; after it exits, the completion callback can start another scan
+            // for the current archive if the first one was canceled or superseded.
+            if (this._rcfTextureScanTask != null)
+            {
+                this.ShowRcfTextureScanStatus();
+                return;
+            }
+            CementFile archive = this._rcfFile;
+            if (archive == null) return;
+
+            List<RcfArchiveItem> itemsToScan = this._rcfItems
+                .Where(item => item != null && item.CanContainP3D && !item.TextureScanAttempted)
+                .ToList();
+            if (itemsToScan.Count == 0) return;
+
+            this.ShowRcfTextureScanStatus();
+            // Drop references from prior TreeNodes before releasing cached parsed models.
+            this.ReleaseUnneededRcfParseCaches();
+
+            var cancellation = new CancellationTokenSource();
+            this._rcfTextureScanCts = cancellation;
+            int generation = ++this._rcfTextureScanGeneration;
+            Task<Dictionary<RcfArchiveItem, RcfTextureScanResult>> task = Task.Run(() =>
+            {
+                var results = new Dictionary<RcfArchiveItem, RcfTextureScanResult>();
+                foreach (RcfArchiveItem item in itemsToScan)
+                {
+                    // Cancellation is an ordinary UI action (for example, when the user
+                    // turns the filter off or opens another archive). Do not throw
+                    // OperationCanceledException from the worker: Visual Studio's
+                    // first-chance exception setting pauses on it even though a continuation
+                    // could handle the canceled Task. Return the partial results instead.
+                    if (cancellation.IsCancellationRequested) break;
+
+                    var hits = new List<RcfTextureHitInfo>();
+                    string error = null;
+                    try
+                    {
+                        // Reuse the one currently active P3D if present, avoiding a second
+                        // copy of that model. All other entries are parsed in a temporary
+                        // method scope and discarded; only compact paths/names survive.
+                        if (item.ParsedFile != null)
+                            CollectRcfTextureHits(item.ParsedFile, hits);
+                        else
+                            ScanRcfEntryForTextureHits(item, hits);
+                    }
+                    catch (Exception ex)
+                    {
+                        error = ex.Message;
+                        hits.Clear();
+                    }
+                    results[item] = new RcfTextureScanResult(hits, error);
+                }
+                return results;
+            });
+            this._rcfTextureScanTask = task;
+
+            task.ContinueWith(completed =>
+            {
+                if (this.IsDisposed || !this.IsHandleCreated)
+                {
+                    cancellation.Dispose();
+                    return;
+                }
+                try
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        bool sameArchive = ReferenceEquals(archive, this._rcfFile);
+                        bool sameGeneration = generation == this._rcfTextureScanGeneration;
+
+                        if (ReferenceEquals(this._rcfTextureScanTask, completed))
+                            this._rcfTextureScanTask = null;
+                        if (ReferenceEquals(this._rcfTextureScanCts, cancellation))
+                            this._rcfTextureScanCts = null;
+                        cancellation.Dispose();
+
+                        // Results from the same archive are useful even if this scan was
+                        // canceled midway. Keep completed entries' compact hit lists and let
+                        // a newer scan continue with only entries that remain unscanned.
+                        if (sameArchive && completed.Status == TaskStatus.RanToCompletion && completed.Result != null)
+                        {
+                            foreach (KeyValuePair<RcfArchiveItem, RcfTextureScanResult> pair in completed.Result)
+                            {
+                                pair.Key.TextureHits = pair.Value.Hits;
+                                pair.Key.TextureScanError = pair.Value.Error;
+                                pair.Key.TextureScanAttempted = true;
+                            }
+                            // Persist only compact texture names/dimensions/chunk paths. The
+                            // next open of the same unchanged RCF can skip rescanning its P3Ds.
+                            if (!this._rcfHasUnsavedChanges)
+                                this.SaveRcfTextureIndexCache();
+                        }
+
+                        if (!sameArchive)
+                        {
+                            // The user opened another archive while this worker was
+                            // finishing. Start the new archive only after the old worker exits.
+                            if (this._onlyTextures && this._rcfFile != null && this._rcfTextureScanTask == null && this.HasUnscannedRcfTextureEntries())
+                                this.StartRcfTextureScanAsync();
+                            else if (this._onlyTextures && this._rcfFile != null && this._rcfTextureScanTask == null)
+                                this.RefreshRcfTree();
+                            return;
+                        }
+
+                        if (completed.Status == TaskStatus.RanToCompletion)
+                        {
+                            if (this._onlyTextures)
+                            {
+                                if (this.HasUnscannedRcfTextureEntries())
+                                {
+                                    // A stale/canceled scan may have produced partial results;
+                                    // queue the remainder now that the previous worker exited.
+                                    this.StartRcfTextureScanAsync();
+                                }
+                                else
+                                {
+                                    this.RefreshRcfTree();
+                                }
+                            }
+                        }
+                        else if (this._onlyTextures && sameGeneration)
+                        {
+                            // True worker failure (not normal cancellation) should be visible,
+                            // but must not be confused with an expected cancellation request.
+                            string message = completed.Exception == null
+                                ? "Сканирование текстур завершилось без результата."
+                                : completed.Exception.GetBaseException().Message;
+                            this.nodeTreeView.BeginUpdate();
+                            this.nodeTreeView.Nodes.Clear();
+                            this.nodeTreeView.Nodes.Add(new TreeNode("Ошибка поиска текстур: " + message));
+                            this.nodeTreeView.EndUpdate();
+                        }
+                    }));
+                }
+                catch (InvalidOperationException)
+                {
+                    cancellation.Dispose();
+                }
+            }, TaskScheduler.Default);
+        }
+
+        private List<RcfTextureHitInfo> GetRcfTextureHits(RcfArchiveItem item)
+        {
+            if (item == null) return new List<RcfTextureHitInfo>();
+            if (item.TextureScanAttempted)
+                return item.TextureHits ?? new List<RcfTextureHitInfo>();
+
+            item.TextureScanAttempted = true;
+            item.TextureHits = new List<RcfTextureHitInfo>();
+            item.TextureScanError = null;
+            if (!item.CanContainP3D || item.Entry == null || !item.Entry.HasData)
+                return item.TextureHits;
+
+            // This method owns the temporary parse scope. When the entry is not already
+            // actively open, ParsedFile is never assigned to RcfArchiveItem.
+            try
+            {
+                Pure3DFile parsed = item.ParsedFile;
+                if (parsed != null)
+                {
+                    CollectRcfTextureHits(parsed, item.TextureHits);
+                }
+                else
+                {
+                    ScanRcfEntryForTextureHits(item, item.TextureHits);
+                }
+            }
+            catch (Exception ex)
+            {
+                item.TextureScanError = ex.Message;
+                // Cache failed scans as empty to avoid reparsing the same malformed/unsupported
+                // entry on every search keystroke. Replacing the entry invalidates this cache.
+                item.TextureScanAttempted = true;
+                item.TextureHits.Clear();
+            }
+            return item.TextureHits;
+        }
+
+        private static bool TextureHitMatches(RcfTextureHitInfo hit, string query)
+        {
+            return hit != null && (string.IsNullOrEmpty(query) ||
+                hit.DisplayText.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                hit.SortText.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                hit.TypeName.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static void ScanRcfEntryForTextureHits(RcfArchiveItem item, List<RcfTextureHitInfo> hits)
+        {
+            if (item == null || item.Entry == null || !item.Entry.HasData) return;
+            using (Stream source = item.Entry.OpenDataRead())
+            {
+                if (Utils.IsRZFile(item.Name))
+                {
+                    if (source.Length < 18) throw new InvalidDataException("Incomplete RZ header.");
+                    source.Position = 18;
+                    // Stream decompressed bytes directly into the chunk indexer. Do not
+                    // materialize the expanded P3D and its texture payloads in another
+                    // MemoryStream: this was the main cause of multi-GB memory spikes.
+                    using (var decompressed = new DeflateStream(source, CompressionMode.Decompress, true))
+                        ScanP3DTextureChunkIndex(decompressed, hits);
+                }
+                else
+                {
+                    ScanP3DTextureChunkIndex(source, hits);
+                }
+            }
+        }
+
+        private static void ScanP3DTextureChunkIndex(Stream input, List<RcfTextureHitInfo> hits)
+        {
+            byte[] fileHeader = ReadExactBytes(input, 12);
+            uint magicLittle = ReadUInt32FromBuffer(fileHeader, 0, false);
+            bool bigEndian;
+            if (magicLittle == 0xFF443350U) bigEndian = false;
+            else if (magicLittle == 0x503344FFU) bigEndian = true;
+            else throw new FormatException("Not a Pure3D file.");
+
+            uint rootHeaderSize = ReadUInt32FromBuffer(fileHeader, 4, bigEndian);
+            uint rootTotalSize = ReadUInt32FromBuffer(fileHeader, 8, bigEndian);
+            if (rootHeaderSize < 12 || rootTotalSize < rootHeaderSize)
+                throw new FormatException("Invalid Pure3D file header.");
+            byte[] skipBuffer = new byte[8192];
+            SkipStreamBytes(input, rootHeaderSize - 12L, skipBuffer);
+            long childBytes = (long)rootTotalSize - rootHeaderSize;
+            var path = new List<int>(16);
+            int visited = 0;
+            ScanP3DChunkSequence(input, childBytes, bigEndian, path, hits, false, 0, ref visited, skipBuffer);
+        }
+
+        private static void ScanP3DChunkSequence(Stream input, long bytesRemaining, bool bigEndian,
+            List<int> path, List<RcfTextureHitInfo> hits, bool insideTextureContainer, int depth, ref int visited, byte[] skipBuffer)
+        {
+            if (depth > 128) throw new FormatException("Pure3D chunk nesting is too deep.");
+            int childIndex = 0;
+            while (bytesRemaining > 0)
+            {
+                if (bytesRemaining < 12) throw new FormatException("Truncated Pure3D child chunk header.");
+                byte[] chunkHeader = ReadExactBytes(input, 12);
+                uint typeId = ReadUInt32FromBuffer(chunkHeader, 0, bigEndian);
+                uint headerSize = ReadUInt32FromBuffer(chunkHeader, 4, bigEndian);
+                uint totalSize = ReadUInt32FromBuffer(chunkHeader, 8, bigEndian);
+                if (headerSize < 12 || totalSize < headerSize || totalSize > bytesRemaining)
+                    throw new FormatException("Invalid Pure3D chunk size for type 0x" + typeId.ToString("X8") + ".");
+                if (++visited > 2000000) throw new FormatException("Pure3D contains too many chunks to index safely.");
+
+                long payloadHeaderSize = (long)headerSize - 12;
+                bool logicalTexture = typeId == 0x00019000U;
+                bool standaloneImage = !insideTextureContainer && (typeId == 0x00019001U || typeId == 0x00019006U);
+                bool readName = logicalTexture || standaloneImage;
+                int captureCount = readName ? (int)Math.Min(payloadHeaderSize, 272L) : 0;
+                byte[] smallHeader = captureCount > 0 ? ReadExactBytes(input, captureCount) : new byte[0];
+                SkipStreamBytes(input, payloadHeaderSize - captureCount, skipBuffer);
+
+                path.Add(childIndex);
+                if (readName)
+                {
+                    string name = ReadP3DNameAndDimensions(smallHeader, bigEndian, out long pixelCount);
+                    string typeName = logicalTexture ? "Texture" : (typeId == 0x00019001U ? "TexturePNG" : "TextureDDS");
+                    string display = string.IsNullOrWhiteSpace(name) ? typeName : typeName + " (" + name + ")";
+                    hits.Add(new RcfTextureHitInfo(path.ToArray(), display, typeName, name, pixelCount));
+                }
+
+                long childBytes = (long)totalSize - headerSize;
+                bool descendantsInsideTexture = insideTextureContainer || logicalTexture;
+                if (childBytes > 0)
+                    ScanP3DChunkSequence(input, childBytes, bigEndian, path, hits,
+                        descendantsInsideTexture, depth + 1, ref visited, skipBuffer);
+                path.RemoveAt(path.Count - 1);
+                bytesRemaining -= totalSize;
+                childIndex++;
+            }
+        }
+
+        private static string ReadP3DNameAndDimensions(byte[] payload, bool bigEndian, out long pixelCount)
+        {
+            pixelCount = 0;
+            if (payload == null || payload.Length < 1) return string.Empty;
+            int nameLength = payload[0];
+            if (nameLength == 0 || nameLength > payload.Length - 1) return string.Empty;
+            string name = System.Text.Encoding.ASCII.GetString(payload, 1, nameLength).TrimEnd('\0', ' ', '\t', '\r', '\n');
+            int dimensionOffset = 1 + nameLength + 4; // length/name then one 32-bit version/format field
+            if (dimensionOffset >= 0 && dimensionOffset + 8 <= payload.Length)
+            {
+                uint width = ReadUInt32FromBuffer(payload, dimensionOffset, bigEndian);
+                uint height = ReadUInt32FromBuffer(payload, dimensionOffset + 4, bigEndian);
+                if (width > 0 && height > 0 && width <= 65536 && height <= 65536)
+                    pixelCount = (long)width * height;
+            }
+            return name;
+        }
+
+        private static uint ReadUInt32FromBuffer(byte[] buffer, int offset, bool bigEndian)
+        {
+            if (buffer == null || offset < 0 || offset + 4 > buffer.Length)
+                throw new EndOfStreamException("Not enough bytes for a 32-bit value.");
+            if (bigEndian)
+                return ((uint)buffer[offset] << 24) | ((uint)buffer[offset + 1] << 16) |
+                    ((uint)buffer[offset + 2] << 8) | buffer[offset + 3];
+            return buffer[offset] | ((uint)buffer[offset + 1] << 8) |
+                ((uint)buffer[offset + 2] << 16) | ((uint)buffer[offset + 3] << 24);
+        }
+
+        private static byte[] ReadExactBytes(Stream input, int count)
+        {
+            if (count < 0) throw new ArgumentOutOfRangeException(nameof(count));
+            byte[] data = new byte[count];
+            int offset = 0;
+            while (offset < count)
+            {
+                int read = input.Read(data, offset, count - offset);
+                if (read <= 0) throw new EndOfStreamException("Unexpected end of Pure3D stream.");
+                offset += read;
+            }
+            return data;
+        }
+
+        private static void SkipStreamBytes(Stream input, long count, byte[] buffer)
+        {
+            if (count < 0) throw new InvalidDataException("Negative Pure3D chunk length.");
+            if (buffer == null || buffer.Length == 0) throw new ArgumentException("Skip buffer is required.", nameof(buffer));
+            while (count > 0)
+            {
+                int amount = (int)Math.Min(buffer.Length, count);
+                int read = input.Read(buffer, 0, amount);
+                if (read <= 0) throw new EndOfStreamException("Unexpected end of Pure3D stream while skipping data.");
+                count -= read;
+            }
+        }
+
+        private static void CollectRcfTextureHits(Pure3DFile p3d, List<RcfTextureHitInfo> hits)
+        {
+            if (p3d == null || p3d.Nodes == null || hits == null) return;
+            var path = new List<int>(8);
+            for (int i = 0; i < p3d.Nodes.Count; i++)
+            {
+                path.Add(i);
+                CollectRcfTextureHitsRecursive(p3d.Nodes[i], path, hits, false);
+                path.RemoveAt(path.Count - 1);
+            }
+        }
+
+        private static void CollectRcfTextureHitsRecursive(BaseNode node, List<int> path,
+            List<RcfTextureHitInfo> hits, bool insideTextureContainer)
+        {
+            if (node == null) return;
+            string nodeType = node.GetType().Name;
+            bool logicalTexture = nodeType == "Texture";
+            bool standaloneImage = !insideTextureContainer && (nodeType == "TexturePNG" || nodeType == "TextureDDS");
+            if (logicalTexture || standaloneImage)
+            {
+                string display = node.ToString() ?? nodeType;
+                string name = GetSortNameStatic(node);
+                long pixelCount = 0;
+                var widthProperty = node.GetType().GetProperty("Width");
+                var heightProperty = node.GetType().GetProperty("Height");
+                try
+                {
+                    if (widthProperty != null && heightProperty != null)
+                    {
+                        long width = Convert.ToInt64(widthProperty.GetValue(node, null));
+                        long height = Convert.ToInt64(heightProperty.GetValue(node, null));
+                        if (width > 0 && height > 0 && width <= 65536 && height <= 65536) pixelCount = width * height;
+                    }
+                }
+                catch { }
+                hits.Add(new RcfTextureHitInfo(path.ToArray(), display, nodeType, name, pixelCount));
+            }
+            if (node.Children == null) return;
+            bool descendantsInsideTexture = insideTextureContainer || logicalTexture;
+            for (int i = 0; i < node.Children.Count; i++)
+            {
+                path.Add(i);
+                CollectRcfTextureHitsRecursive(node.Children[i], path, hits, descendantsInsideTexture);
+                path.RemoveAt(path.Count - 1);
+            }
+        }
+
+        private void PopulateFilteredRcfTextureNodes(TreeNode parent, RcfArchiveItem item, List<RcfTextureHitInfo> hits)
+        {
+            if (parent == null || item == null) return;
+            parent.Nodes.Clear();
+            if (hits == null) return;
+            foreach (RcfTextureHitInfo hit in hits)
+            {
+                var searchHit = new RcfTextureSearchHit(item, hit.PathIndices, hit.DisplayText, hit.TypeName);
+                parent.Nodes.Add(new TreeNode(hit.DisplayText)
+                {
+                    Tag = searchHit,
+                    ToolTipText = hit.TypeName + "\n" + hit.DisplayText,
+                    ImageKey = "texture",
+                    SelectedImageKey = "texture"
+                });
+            }
+        }
+
+        private static BaseNode ResolveRcfTextureHit(Pure3DFile p3d, int[] pathIndices)
+        {
+            if (p3d == null || p3d.Nodes == null || pathIndices == null || pathIndices.Length == 0) return null;
+            int rootIndex = pathIndices[0];
+            if (rootIndex < 0 || rootIndex >= p3d.Nodes.Count) return null;
+            BaseNode node = p3d.Nodes[rootIndex];
+            for (int i = 1; i < pathIndices.Length; i++)
+            {
+                if (node == null || node.Children == null || pathIndices[i] < 0 || pathIndices[i] >= node.Children.Count)
+                    return null;
+                node = node.Children[pathIndices[i]];
+            }
+            return node;
+        }
+
+        private bool HasExternalSessionForItem(RcfArchiveItem item)
+        {
+            return item != null && this._externalOpenSessions.Any(session => !session.IsDisposed &&
+                session.Target != null && ReferenceEquals(session.Target.ArchiveItem, item));
+        }
+
+        private void ReleaseInactiveRcfEntryData()
+        {
+            if (this._rcfItems == null) return;
+            IList<TreeNode> selectedNodes = this.nodeTreeView == null
+                ? new List<TreeNode>() : this.nodeTreeView.SelectedNodes;
+            foreach (RcfArchiveItem item in this._rcfItems)
+            {
+                if (item == null || item.Entry == null || item == this._activeRcfItem || item.ParsedFileModified ||
+                    this.HasExternalSessionForItem(item) || this.HasUndoRedoHistoryForItem(item))
+                    continue;
+
+                // A multi-CompositeDrawable preview can still reference nodes from more than one
+                // archive entry. Never evict a tree while the grouped preview owns those nodes.
+                if (this._multiCompositePreviewActive) continue;
+                bool hasSelectedDescendant = selectedNodes.Any(node => ReferenceEquals(this.FindRcfEntryAncestor(node), item)) ||
+                    ReferenceEquals(this.FindRcfEntryAncestor(this.nodeTreeView == null ? null : this.nodeTreeView.SelectedNode), item);
+                if (hasSelectedDescendant) continue;
+
+                item.Entry.ReleaseLoadedData();
+                if (item.ParsedFile != null)
+                {
+                    TreeNode itemTreeNode = this.FindRcfArchiveItemTreeNode(item);
+                    if (itemTreeNode != null)
+                    {
+                        // Child TreeNodes retain strong references to every parsed BaseNode. Clear
+                        // them before dropping ParsedFile, and leave the normal lazy-load sentinel.
+                        itemTreeNode.Collapse();
+                        itemTreeNode.Nodes.Clear();
+                        if (item.CanContainP3D)
+                            itemTreeNode.Nodes.Add(new TreeNode
+                            {
+                                Text = UiLocalization.TranslateId("tree.loadingP3D", "Загрузка P3D...", this._uiLanguage),
+                                Tag = null
+                            });
+                    }
+                    item.ParsedFile = null;
+                    item.ParseAttempted = false;
+                    item.ParseError = null;
+                }
+            }
+        }
+
+        private TreeNode FindRcfArchiveItemTreeNode(RcfArchiveItem target)
+        {
+            if (target == null || this.nodeTreeView == null) return null;
+            var pending = new Stack<TreeNode>(this.nodeTreeView.Nodes.Cast<TreeNode>().Reverse());
+            while (pending.Count > 0)
+            {
+                TreeNode node = pending.Pop();
+                if (ReferenceEquals(node.Tag, target)) return node;
+                for (int i = node.Nodes.Count - 1; i >= 0; i--) pending.Push(node.Nodes[i]);
+            }
+            return null;
+        }
+
+        private void ReleaseUnneededRcfParseCaches()
+        {
+            // Keep the active entry, unsynchronized edits, external sessions, and any parsed
+            // entry whose live node objects are still referenced by undo/redo actions. Source-backed
+            // byte arrays are independently releasable because they can be read again from disk.
+            foreach (RcfArchiveItem item in this._rcfItems)
+            {
+                if (item == null || item == this._activeRcfItem || item.ParsedFileModified ||
+                    this.HasExternalSessionForItem(item) || this.HasUndoRedoHistoryForItem(item))
+                    continue;
+                if (item.ParsedFile != null)
+                {
+                    item.ParsedFile = null;
+                    item.ParseAttempted = false;
+                    item.ParseError = null;
+                }
+                if (item.Entry != null) item.Entry.ReleaseLoadedData();
+            }
+        }
+
+        private static bool NodeTreeContainsTextureMatch(BaseNode node, string query)
+        {
+            if (node == null) return false;
+            if (IsTextureNode(node))
+            {
+                string name = node.ToString() ?? string.Empty;
+                if (string.IsNullOrEmpty(query) || name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    GetSortNameStatic(node).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            if (node.Children != null)
+                foreach (BaseNode child in node.Children)
+                    if (NodeTreeContainsTextureMatch(child, query)) return true;
+            return false;
+        }
+
+        private static bool IsTextureNode(BaseNode node)
+        {
+            if (node == null) return false;
+            string typeName = node.GetType().Name;
+            if (typeName.IndexOf("Texture", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                typeName.IndexOf("Image", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+
+            string text = node.ToString() ?? string.Empty;
+            string lower = text.ToLowerInvariant();
+            return lower.Contains(".dds") || lower.Contains(".tga") || lower.Contains(".png") ||
+                   lower.Contains(".bmp") || lower.Contains(".jpg") || lower.Contains(".jpeg") ||
+                   lower.Contains(".tif") || lower.Contains(".tiff") || lower.Contains(".gif");
+        }
+
+        private static bool AddFilteredP3DNode(TreeNodeCollection destination, BaseNode node, string query)
+        {
+            if (destination == null || node == null) return false;
+            string display = node.ToString() ?? node.GetType().Name;
+            bool ownMatch = IsTextureNode(node) &&
+                (string.IsNullOrEmpty(query) || display.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 GetSortNameStatic(node).IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0);
+
+            string imageKey = GetBaseNodeTreeImageKey(node);
+            TreeNode candidate = new TreeNode(display)
+            {
+                Tag = node,
+                ImageKey = imageKey,
+                SelectedImageKey = imageKey,
+                ToolTipText = node.GetType().Name + "\n" + display
+            };
+            if (node.Children != null)
+                foreach (BaseNode child in node.Children)
+                    AddFilteredP3DNode(candidate.Nodes, child, query);
+
+            if (!ownMatch && candidate.Nodes.Count == 0) return false;
+            destination.Add(candidate);
+            return true;
+        }
+
+        private void AddFilteredPure3DRootNodes(TreeNode parent, Pure3DFile p3d, string query)
+        {
+            if (parent == null || p3d == null || p3d.Nodes == null) return;
+            foreach (BaseNode child in p3d.Nodes)
+                AddFilteredP3DNode(parent.Nodes, child, query);
+        }
+
+        private void PopulateRcfEntryNode(TreeNode node, RcfArchiveItem item)
+        {
+            if (node == null || item == null) return;
+            node.Nodes.Clear();
+            if (!this.EnsureRcfEntryParsed(item) || item.ParsedFile == null) return;
+            this.AddPure3DRootNodes(node, item.ParsedFile, this._archiveP3DNodeTypeFilter);
+            this.ApplyTreeNodeLocalization(node.Nodes, this._uiLanguage);
+        }
+
+        private void AddPure3DRootNodes(TreeNode parent, Pure3DFile p3d, string rootTypeFilter = null)
+        {
+            if (parent == null || p3d == null || p3d.Nodes == null) return;
+            foreach (BaseNode child in p3d.Nodes)
+            {
+                if (!string.IsNullOrEmpty(rootTypeFilter) &&
+                    !string.Equals(child.GetType().Name, rootTypeFilter, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                string imageKey = GetBaseNodeTreeImageKey(child);
+                var childNode = new TreeNode(child.ToString())
+                {
+                    Tag = child, ImageKey = imageKey, SelectedImageKey = imageKey,
+                    ToolTipText = child.GetType().Name + "\n" + child.ToString() + "\n" + UiLocalization.TranslateId("tree.tooltip.p3dDepthPrefix", "Глубина P3D: ", this._uiLanguage) + (parent.Level + 1)
+                };
+                if (child.Children != null && child.Children.Count > 0)
+                    childNode.Nodes.Add(new TreeNode { Text = UiLocalization.TranslateId("tree.loading", "Загрузка...", this._uiLanguage), Tag = null });
+                parent.Nodes.Add(childNode);
+            }
+        }
+
+        private bool EnsureRcfEntryParsed(RcfArchiveItem item)
+        {
+            if (item == null || !item.CanContainP3D || item.Entry == null || !item.Entry.HasData) return false;
+            if (item.ParseAttempted) return item.ParsedFile != null;
+
+            RcfEntryParseResult result;
+            Task<RcfEntryParseResult> pending;
+            if (this._rcfEntryParseTasks.TryGetValue(item, out pending))
+            {
+                // Legacy command handlers still use the synchronous contract. If one is invoked
+                // while the tree is already loading this entry, wait for the shared worker rather
+                // than decompressing/parsing the payload a second time.
+                try { result = pending.GetAwaiter().GetResult(); }
+                catch (Exception ex) { result = RcfEntryParseResult.Failed(item.Entry.DataRevision, ex.Message); }
+            }
+            else
+            {
+                result = ParseRcfEntryData(item);
+            }
+
+            this.ApplyRcfEntryParseResult(item, result);
+            Task<RcfEntryParseResult> currentTask;
+            if (this._rcfEntryParseTasks.TryGetValue(item, out currentTask) &&
+                (pending == null || ReferenceEquals(currentTask, pending)))
+                this._rcfEntryParseTasks.Remove(item);
+            return item.ParsedFile != null;
+        }
+
+        private bool ShouldParseRcfEntryInBackground(RcfArchiveItem item)
+        {
+            if (item == null || item.ParseAttempted || item.Entry == null || !item.Entry.HasData || !item.CanContainP3D)
+                return false;
+            // RZ's declared decoded size can be much larger than its packed entry, so all .p3d.rz
+            // entries use the background path. Large plain P3D files do as well.
+            long bytes = item.Entry.DataLength;
+            return Utils.IsRZFile(item.Name) || bytes >= 1024L * 1024L;
+        }
+
+        private Task<RcfEntryParseResult> GetOrStartRcfEntryParseTask(RcfArchiveItem item)
+        {
+            Task<RcfEntryParseResult> task;
+            if (this._rcfEntryParseTasks.TryGetValue(item, out task)) return task;
+            task = Task.Run(() => ParseRcfEntryData(item));
+            this._rcfEntryParseTasks[item] = task;
+            return task;
+        }
+
+        private async Task<RcfEntryParseResult> EnsureRcfEntryParsedAsync(RcfArchiveItem item)
+        {
+            if (item == null || !item.CanContainP3D || item.Entry == null || !item.Entry.HasData)
+                return RcfEntryParseResult.Failed(item == null || item.Entry == null ? -1 : item.Entry.DataRevision,
+                    "Нет доступных данных P3D.");
+            if (item.ParseAttempted)
+                return RcfEntryParseResult.FromCached(item);
+
+            Task<RcfEntryParseResult> task = this.GetOrStartRcfEntryParseTask(item);
+            RcfEntryParseResult result;
+            try { result = await task; }
+            catch (Exception ex) { result = RcfEntryParseResult.Failed(item.Entry.DataRevision, ex.Message); }
+
+            // A worker may finish after another RCF document has replaced this one. Do not publish
+            // old nodes into the current document, or cache a parse of an entry that was edited mid-read.
+            if (!this.IsDisposed && ReferenceEquals(item.Owner, this._rcfFile) &&
+                item.Entry != null && item.Entry.DataRevision == result.EntryRevision)
+                this.ApplyRcfEntryParseResult(item, result);
+            else if (!this.IsDisposed && ReferenceEquals(item.Owner, this._rcfFile) && item.Entry != null)
+                item.ParseError = "Данные ресурса изменились во время чтения. Повторите открытие.";
+
+            Task<RcfEntryParseResult> currentTask;
+            if (this._rcfEntryParseTasks.TryGetValue(item, out currentTask) && ReferenceEquals(currentTask, task))
+                this._rcfEntryParseTasks.Remove(item);
+            return result;
+        }
+
+        private void ApplyRcfEntryParseResult(RcfArchiveItem item, RcfEntryParseResult result)
+        {
+            if (item == null || result == null || item.ParseAttempted) return;
+            if (item.Entry != null && result.EntryRevision >= 0 && item.Entry.DataRevision != result.EntryRevision)
+            {
+                item.ParseError = "Данные ресурса изменились во время чтения. Повторите открытие.";
+                return;
+            }
+
+            item.ParseAttempted = true;
+            // Keep the full editable P3D tree separate from the compact archive-wide animation catalog.
+            item.ParsedFile = result.File;
+            item.ParseError = result.Error;
+            if (result.File != null)
+            {
+                WriteApplicationLog("RCF_P3D_ENTRY_PARSE_READY", string.Format(CultureInfo.InvariantCulture,
+                    "P3D внутри RCF разобран: name={0}; packedBytes={1}; decodedBytes={2}; roots={3}; parallel={4}; workers={5}; decompressMs={6:0.0}; parseMs={7:0.0}; elapsedMs={8:0.0}",
+                    item.Name, result.PackedBytes, result.DecodedBytes, result.RootChunkCount,
+                    result.UsedParallel, result.WorkerCount, result.DecompressMilliseconds,
+                    result.ParseMilliseconds, result.ElapsedMilliseconds));
+            }
+            else
+            {
+                WriteApplicationLog("RCF_P3D_ENTRY_PARSE_FAILED", "Не удалось разобрать P3D внутри RCF: name=" +
+                    item.Name + "; error=" + (result.Error ?? "unknown"));
+            }
+            this.propGrid?.Refresh();
+        }
+
+        private static RcfEntryParseResult ParseRcfEntryData(RcfArchiveItem item)
+        {
+            if (item == null || item.Entry == null || !item.Entry.HasData)
+                return RcfEntryParseResult.Failed(item == null || item.Entry == null ? -1 : item.Entry.DataRevision,
+                    "Нет данных ресурса.");
+
+            Entry entry = item.Entry;
+            string entryName = item.Name;
+            long revision = entry.DataRevision;
+            Stopwatch total = Stopwatch.StartNew();
+            Stopwatch decompress = new Stopwatch();
+            Stopwatch parse = new Stopwatch();
+            long packedBytes = entry.DataLength;
+            long decodedBytes = packedBytes;
+            int roots = 0;
+            bool usedParallel = false;
+            int workerCount = 1;
+            try
+            {
+                var parsed = new Pure3DFile { GamePicked = PrototypeGame.Any };
+                using (Stream source = entry.OpenDataRead())
+                {
+                    if (Utils.IsRZFile(entryName))
+                    {
+                        int declaredSize = GetRzDeclaredOutputSize(source);
+                        // Keep the fast in-memory path for ordinary assets. Very large or
+                        // nonstandard RZ files retain the disk-backed fallback to cap peak RAM.
+                        if (declaredSize <= 0 || declaredSize > 128 * 1024 * 1024)
+                        {
+                            string temporaryPath = null;
+                            try
+                            {
+                                decompress.Start();
+                                using (FileStream decodedFile = DecompressRZToTemporaryFile(source, out temporaryPath))
+                                {
+                                    decompress.Stop();
+                                    decodedBytes = decodedFile.Length;
+                                    parse.Start();
+                                    parsed.Deserialize(decodedFile, Endian.Little);
+                                    parse.Stop();
+                                    roots = parsed.Nodes.Count;
+                                }
+                            }
+                            finally { DeleteTemporaryFileQuietly(temporaryPath); }
+                        }
+                        else
+                        {
+                            using (var decoded = new MemoryStream(declaredSize))
+                            {
+                                decompress.Start();
+                                Utils.DecompressRZ(source, decoded);
+                                decompress.Stop();
+                                decodedBytes = decoded.Length;
+                                decoded.Position = 0;
+                                parse.Start();
+                                workerCount = Math.Max(1, Math.Min(8, Environment.ProcessorCount - 1));
+                                usedParallel = DeserializeRcfP3DMemory(parsed, decoded, workerCount, out roots);
+                                parse.Stop();
+                            }
+                        }
+                    }
+                    else if (source.CanSeek && source.Length >= 1024L * 1024L && source.Length <= 128L * 1024L * 1024L)
+                    {
+                        // Parallel root-chunk parsing needs independent cursors over a shared,
+                        // immutable buffer. Avoid temporary disk files and random reads from RCF.
+                        using (var decoded = new MemoryStream(checked((int)source.Length)))
+                        {
+                            source.CopyTo(decoded);
+                            decodedBytes = decoded.Length;
+                            decoded.Position = 0;
+                            parse.Start();
+                            workerCount = Math.Max(1, Math.Min(8, Environment.ProcessorCount - 1));
+                            usedParallel = DeserializeRcfP3DMemory(parsed, decoded, workerCount, out roots);
+                            parse.Stop();
+                        }
+                    }
+                    else
+                    {
+                        parse.Start();
+                        parsed.Deserialize(source, Endian.Little);
+                        parse.Stop();
+                        roots = parsed.Nodes.Count;
+                    }
+                }
+
+                total.Stop();
+                return new RcfEntryParseResult(parsed, null, revision, packedBytes, decodedBytes, roots,
+                    usedParallel, usedParallel ? workerCount : 1, decompress.Elapsed.TotalMilliseconds,
+                    parse.Elapsed.TotalMilliseconds, total.Elapsed.TotalMilliseconds);
+            }
+            catch (Exception ex)
+            {
+                total.Stop();
+                Exception report = ex;
+                AggregateException aggregate = ex as AggregateException;
+                if (aggregate != null && aggregate.Flatten().InnerExceptions.Count > 0)
+                    report = aggregate.Flatten().InnerExceptions[0];
+                return new RcfEntryParseResult(null, report.Message, revision, packedBytes, decodedBytes, roots,
+                    usedParallel, usedParallel ? workerCount : 1, decompress.Elapsed.TotalMilliseconds,
+                    parse.Elapsed.TotalMilliseconds, total.Elapsed.TotalMilliseconds);
+            }
+        }
+
+        private static bool DeserializeRcfP3DMemory(Pure3DFile parsed, MemoryStream decoded,
+            int maxDegreeOfParallelism, out int rootChunkCount)
+        {
+            if (parsed == null) throw new ArgumentNullException(nameof(parsed));
+            if (decoded == null) throw new ArgumentNullException(nameof(decoded));
+            decoded.Position = 0;
+            try
+            {
+                if (parsed.TryDeserializeParallel(decoded, Endian.Little, maxDegreeOfParallelism,
+                    CancellationToken.None, out rootChunkCount))
+                    return true;
+            }
+            catch (AggregateException aggregate)
+            {
+                // Root-chunk parsing is an optimization only. If a chunk reader behaves
+                // differently under parallel execution, retry with the established serial parser.
+                Exception first = aggregate.Flatten().InnerExceptions.FirstOrDefault();
+                if (first is OutOfMemoryException) throw first;
+            }
+
+            parsed.Nodes.Clear();
+            decoded.Position = 0;
+            parsed.Deserialize(decoded, Endian.Little);
+            rootChunkCount = parsed.Nodes.Count;
+            return false;
+        }
+
+        private static int GetRzDeclaredOutputSize(Stream source)
+        {
+            if (source == null || !source.CanSeek || source.Length < 12L) return 0;
+            long saved = source.Position;
+            try
+            {
+                source.Position = 8L;
+                int declared = source.ReadValueS32(Endian.Little);
+                // The signed 32-bit size is part of the RZ header. Nonpositive values are
+                // treated as unknown and use the disk-backed fallback instead of growing RAM blindly.
+                return declared > 0 ? declared : 0;
+            }
+            catch { return 0; }
+            finally { source.Position = saved; }
+        }
+
+        private void OnTreeNodeBeforeExpand(TreeViewCancelEventArgs e)
+        {
+            if (e == null || e.Node == null) return;
+            RcfArchiveItem item = e.Node.Tag as RcfArchiveItem;
+            if (item != null && !this._onlyTextures &&
+                (this.ShouldParseRcfEntryInBackground(item) || this._rcfEntryParseTasks.ContainsKey(item)))
+            {
+                WriteApplicationLog("RCF_P3D_ENTRY_PARSE_REQUESTED", "Запрошено чтение P3D из RCF в фоне: " + item.Name);
+                // Allow the node to expand with a temporary child, then replace it when the shared
+                // parse task completes. The UI remains able to process input and paint meanwhile.
+                if (e.Node.Nodes.Count == 0 || e.Node.Nodes[0].Tag != null)
+                {
+                    e.Node.Nodes.Clear();
+                    e.Node.Nodes.Add(new TreeNode("Чтение P3D и построение секций…") { Tag = null });
+                }
+                _ = this.CompleteRcfEntryExpansionAsync(e.Node, item);
+                return;
+            }
+            this.OnNodeBeforeExpand(e.Node);
+        }
+
+        private async Task CompleteRcfEntryExpansionAsync(TreeNode node, RcfArchiveItem item)
+        {
+            RcfEntryParseResult result = await this.EnsureRcfEntryParsedAsync(item);
+            if (this.IsDisposed || node == null || node.TreeView != this.nodeTreeView ||
+                !ReferenceEquals(item.Owner, this._rcfFile)) return;
+
+            if (item.ParsedFile == null)
+            {
+                node.Nodes.Clear();
+                node.Nodes.Add(new TreeNode("Ошибка чтения P3D: " + (item.ParseError ?? result.Error ?? "неизвестная ошибка"))
+                    { Tag = item });
+                return;
+            }
+
+            // A parallel selection/expansion waiter may already have populated this node.
+            if (node.Nodes.Count > 0 && node.Nodes[0].Tag != null) return;
+            this.PopulateRcfEntryNode(node, item);
+            if (!node.IsExpanded && node.Nodes.Count > 0) node.Expand();
+        }
+
+        private async void CompleteRcfEntrySelectionAsync(TreeNode node, RcfArchiveItem item)
+        {
+            RcfEntryParseResult result = await this.EnsureRcfEntryParsedAsync(item);
+            if (this.IsDisposed || node == null || node.TreeView != this.nodeTreeView ||
+                !ReferenceEquals(item.Owner, this._rcfFile) || this.nodeTreeView.SelectedNode != node) return;
+
+            this._activeRcfItem = item;
+            this._file = item.ParsedFile;
+            this.propGrid.SelectedObject = item;
+            this.propGrid.Refresh();
+            if (item.ParsedFile == null && !string.IsNullOrWhiteSpace(item.ParseError))
+                WriteApplicationLog("RCF_P3D_ENTRY_SELECTION_ERROR", "Ошибка чтения P3D при выборе записи: " + item.Name + "; " + item.ParseError);
+            else if (result != null)
+                WriteApplicationLog("RCF_P3D_ENTRY_SELECTION_READY", string.Format(CultureInfo.InvariantCulture,
+                    "P3D выбран: name={0}; roots={1}; elapsedMs={2:0.0}; workers={3}",
+                    item.Name, item.ParsedFile != null ? item.ParsedFile.Nodes.Count : 0,
+                    result.ElapsedMilliseconds, result.WorkerCount));
+            this.UpdateMainToolbarState();
+        }
+
+        private RcfArchiveItem FindRcfEntryAncestor(TreeNode node)
+        {
+            for (TreeNode current = node; current != null; current = current.Parent)
+            {
+                var item = current.Tag as RcfArchiveItem;
+                if (item != null) return item;
+            }
+            return null;
+        }
+
+        private void OnTreeSelectedNodesChanged()
+        {
+            if (this.nodeTreeView == null || this._loadingMultiCompositePreview) return;
+            IList<TreeNode> selectedNodes = this.nodeTreeView.SelectedNodes;
+            if (selectedNodes.Count > 1 && selectedNodes.All(node => node != null && node.Tag is CompositeDrawable))
+            {
+                this.LoadSelectedCompositeGroup(selectedNodes, this.nodeTreeView.SelectedNode);
+                return;
+            }
+
+            // If a modifier-key selection turns into a mixed group (or drops back to one
+            // node), update the active preview once the selection set is committed.
+            if ((this._multiCompositePreviewActive || this.nodeTreeView.IsSelectionGestureInProgress) &&
+                this.nodeTreeView.SelectedNode != null)
+            {
+                this._multiCompositePreviewActive = false;
+                this.OnTreeNodeSelected(this.nodeTreeView.SelectedNode);
+                this.ReleaseInactiveRcfEntryData();
+                this.UpdateMainToolbarState();
+            }
+        }
+
+        private void LoadSelectedCompositeGroup(IList<TreeNode> selectedNodes, TreeNode activeTreeNode)
+        {
+            if (this.viewer3D == null || selectedNodes == null || selectedNodes.Count < 2 || activeTreeNode == null)
+                return;
+
+            var sources = new List<KeyValuePair<CompositeDrawable, Pure3DFile>>();
+            RcfArchiveItem activeItem = this.FindRcfEntryAncestor(activeTreeNode);
+            foreach (TreeNode selectedTreeNode in selectedNodes)
+            {
+                CompositeDrawable composite = selectedTreeNode == null ? null : selectedTreeNode.Tag as CompositeDrawable;
+                if (composite == null) return;
+                RcfArchiveItem entry = this.FindRcfEntryAncestor(selectedTreeNode);
+                Pure3DFile sourceP3D;
+                if (entry != null)
+                {
+                    if (!this.EnsureRcfEntryParsed(entry) || entry.ParsedFile == null) return;
+                    sourceP3D = entry.ParsedFile;
+                }
+                else
+                {
+                    sourceP3D = this._file;
+                }
+                if (sourceP3D == null) return;
+                if (!sources.Any(pair => ReferenceEquals(pair.Key, composite)))
+                    sources.Add(new KeyValuePair<CompositeDrawable, Pure3DFile>(composite, sourceP3D));
+            }
+
+            CompositeDrawable activeComposite = activeTreeNode.Tag as CompositeDrawable;
+            KeyValuePair<CompositeDrawable, Pure3DFile> activeSource = sources.FirstOrDefault(pair => ReferenceEquals(pair.Key, activeComposite));
+            if (activeSource.Key == null || activeSource.Value == null) return;
+            // Make the active composite the last/primary item so animation context and source
+            // labels follow the node with keyboard focus.
+            sources.RemoveAll(pair => ReferenceEquals(pair.Key, activeComposite));
+            sources.Add(activeSource);
+
+            this._loadingMultiCompositePreview = true;
+            try
+            {
+                this._activeRcfItem = activeItem;
+                this._file = activeSource.Value;
+                this.propGrid.SelectedObject = activeComposite;
+                var animationSources = activeItem != null
+                    ? this.GetParsedRcfAnimationSourceFiles(activeItem)
+                    : this.GetStandaloneAnimationSourceFiles(activeSource.Value);
+                this.viewer3D.SetAnimationNodeLoaders(activeItem != null && this._rcfFile != null
+                    ? this.GetRcfAnimationLoadersForSources(animationSources)
+                    : new Dictionary<Animation, Func<Animation>>(), false);
+                this.viewer3D.SetAnimationSourceFiles(animationSources, false);
+                bool loaded = this.viewer3D.LoadCompositeDrawables(sources);
+                this._multiCompositePreviewActive = loaded;
+                if (loaded) this.SwitchViewMode(true);
+            }
+            finally
+            {
+                this._loadingMultiCompositePreview = false;
+            }
+        }
+
+        private void OnTreeNodeSelected(TreeNode treeNode)
+        {
+            if (treeNode == null)
+            {
+                this._multiCompositePreviewActive = false;
+                if (this.viewer3D != null)
+                {
+                    this.viewer3D.SetAnimationNodeLoaders(new Dictionary<Animation, Func<Animation>>(), false);
+                    this.viewer3D.SetAnimationSourceFiles(new List<KeyValuePair<Pure3DFile, string>>(), false);
+                }
+                this.propGrid.SelectedObject = null;
+                this.OnNodeSelected(null);
+                return;
+            }
+
+            var folderItem = treeNode.Tag as RcfFolderItem;
+            if (folderItem != null)
+            {
+                this._activeRcfItem = null;
+                this._file = null;
+                if (this.viewer3D != null)
+                {
+                    this.viewer3D.SetAnimationNodeLoaders(new Dictionary<Animation, Func<Animation>>(), false);
+                    this.viewer3D.SetAnimationSourceFiles(new List<KeyValuePair<Pure3DFile, string>>(), false);
+                }
+                this.propGrid.SelectedObject = folderItem;
+                this.ClearNodePreview(true);
+                return;
+            }
+
+            var textureSearchHit = treeNode.Tag as RcfTextureSearchHit;
+            if (textureSearchHit != null)
+            {
+                RcfArchiveItem previousItem = this._activeRcfItem;
+                if (!this.EnsureRcfEntryParsed(textureSearchHit.Item) || textureSearchHit.Item.ParsedFile == null)
+                {
+                    this.propGrid.SelectedObject = textureSearchHit.Item;
+                    return;
+                }
+                BaseNode hitNode = ResolveRcfTextureHit(textureSearchHit.Item.ParsedFile, textureSearchHit.PathIndices);
+                if (hitNode == null)
+                {
+                    this.propGrid.SelectedObject = textureSearchHit.Item;
+                    this.ShowLocalizedMessageBoxById(this, "message.textureSearch.stalePath",
+                        "Не удалось повторно найти текстуру по сохранённому пути. Обновите фильтр.",
+                        "caption.textureSearch", "Поиск текстур", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                this._activeRcfItem = textureSearchHit.Item;
+                this._file = textureSearchHit.Item.ParsedFile;
+                if (this.viewer3D != null)
+                {
+                    var animationSources = this.GetParsedRcfAnimationSourceFiles(textureSearchHit.Item);
+                    this.viewer3D.SetAnimationNodeLoaders(this.GetRcfAnimationLoadersForSources(animationSources), false);
+                    this.viewer3D.SetAnimationSourceFiles(animationSources, false);
+                }
+                this.OnNodeSelected(hitNode);
+                // ReleaseInactiveRcfEntryData also clears the previous entry's TreeNodes so
+                // they do not keep every previously parsed resource graph alive.
+                this.ReleaseInactiveRcfEntryData();
+                return;
+            }
+
+            var archiveRootItem = treeNode.Tag as RcfArchiveItem;
+            if (archiveRootItem != null)
+            {
+                if (this.viewer3D != null)
+                {
+                    this.viewer3D.SetAnimationNodeLoaders(new Dictionary<Animation, Func<Animation>>(), false);
+                    this.viewer3D.SetAnimationSourceFiles(new List<KeyValuePair<Pure3DFile, string>>(), false);
+                }
+                this.propGrid.SelectedObject = archiveRootItem;
+                this.ClearNodePreview(true);
+                if (this._onlyTextures)
+                {
+                    this._activeRcfItem = null;
+                    this._file = null;
+                    return;
+                }
+                this._activeRcfItem = archiveRootItem;
+                if (this.ShouldParseRcfEntryInBackground(archiveRootItem) ||
+                    this._rcfEntryParseTasks.ContainsKey(archiveRootItem))
+                {
+                    this._file = null;
+                    WriteApplicationLog("RCF_P3D_ENTRY_PARSE_REQUESTED", "Запрошено чтение P3D из RCF в фоне: " + archiveRootItem.Name);
+                    this.CompleteRcfEntrySelectionAsync(treeNode, archiveRootItem);
+                    return;
+                }
+                this._file = this.EnsureRcfEntryParsed(archiveRootItem) ? archiveRootItem.ParsedFile : null;
+                if (archiveRootItem.CanContainP3D && archiveRootItem.ParsedFile != null && treeNode.Nodes.Count > 0 && treeNode.Nodes[0].Tag == null)
+                    this.PopulateRcfEntryNode(treeNode, archiveRootItem);
+                return;
+            }
+
+            var node = treeNode.Tag as BaseNode;
+            if (node != null)
+            {
+                RcfArchiveItem entry = this.FindRcfEntryAncestor(treeNode);
+                if (entry != null)
+                {
+                    if (!this.EnsureRcfEntryParsed(entry))
+                    {
+                        this.propGrid.SelectedObject = entry;
+                        return;
+                    }
+                    this._activeRcfItem = entry;
+                    this._file = entry.ParsedFile;
+                }
+                else
+                {
+                    this._activeRcfItem = null;
+                }
+
+                if (this.viewer3D != null)
+                {
+                    var animationSources = entry != null
+                        ? this.GetParsedRcfAnimationSourceFiles(entry)
+                        : this.GetStandaloneAnimationSourceFiles(this._file);
+                    this.viewer3D.SetAnimationNodeLoaders(entry != null && this._rcfFile != null
+                        ? this.GetRcfAnimationLoadersForSources(animationSources)
+                        : new Dictionary<Animation, Func<Animation>>(), false);
+                    this.viewer3D.SetAnimationSourceFiles(animationSources, false);
+                }
+
+                this.OnNodeSelected(node);
+                return;
+            }
+
+            this.propGrid.SelectedObject = treeNode.Tag;
+        }
+
+        private void ClearNodePreview(bool preserveAnimationCatalog = false)
+        {
+            this._multiCompositePreviewActive = false;
+            Image source = this._currentSourceBmp;
+            Image displayed = this.previewBox != null ? this.previewBox.Image : null;
+            this._currentSourceBmp = null;
+            if (this.previewBox != null) this.previewBox.Image = null;
+            if (source != null) source.Dispose();
+            if (displayed != null && !ReferenceEquals(displayed, source)) displayed.Dispose();
+            if (this.viewer3D != null) this.viewer3D.ClearScene(preserveAnimationCatalog);
+            if (this.resolutionLabel != null) this.resolutionLabel.Text = string.Empty;
+        }
+
+        private void OnPropertyGridValueChanged(PropertyValueChangedEventArgs e)
+        {
+            if (!this._isApplyingUndoRedo && e != null && e.ChangedItem != null)
+            {
+                PropertyDescriptor descriptor = e.ChangedItem.PropertyDescriptor;
+                object target = this.ResolvePropertyGridOwner(e.ChangedItem);
+                object historyRoot = this.propGrid == null ? null : this.propGrid.SelectedObject;
+                RcfArchiveItem historyArchiveItem = historyRoot as RcfArchiveItem ?? this._activeRcfItem;
+                Pure3DFile historyStandaloneFile = historyArchiveItem == null ? this._file : null;
+                object oldValue = CloneHistoryValue(e.OldValue);
+                object newValue = CloneHistoryValue(e.ChangedItem.Value);
+                bool supportedHistoryContext = historyRoot is BaseNode || historyRoot is RcfArchiveItem;
+                if (descriptor != null && target != null && supportedHistoryContext && !object.Equals(oldValue, newValue))
+                {
+                    string description = "Изменение: " + descriptor.DisplayName;
+                    this.PushUndoRedoAction(new UndoRedoAction(description,
+                        () => this.ApplyPropertyGridHistoryValue(target, descriptor, oldValue, historyRoot, historyArchiveItem, historyStandaloneFile),
+                        () => this.ApplyPropertyGridHistoryValue(target, descriptor, newValue, historyRoot, historyArchiveItem, historyStandaloneFile),
+                        historyArchiveItem));
+                }
+            }
+            this.MarkPropertyGridDocumentModified();
+        }
+
+        private object ResolvePropertyGridOwner(GridItem changedItem)
+        {
+            GridItem parent = changedItem == null ? null : changedItem.Parent;
+            while (parent != null)
+            {
+                if (parent.GridItemType == GridItemType.Property && parent.Value != null)
+                    return parent.Value;
+                parent = parent.Parent;
+            }
+            return this.propGrid == null ? null : this.propGrid.SelectedObject;
+        }
+
+        private static object CloneHistoryValue(object value)
+        {
+            if (value == null) return null;
+            byte[] bytes = value as byte[];
+            if (bytes != null) return (byte[])bytes.Clone();
+            Array array = value as Array;
+            if (array != null) return array.Clone();
+            ICloneable cloneable = value as ICloneable;
+            if (cloneable != null) return cloneable.Clone();
+            return value;
+        }
+
+        private void ApplyPropertyGridHistoryValue(object target, PropertyDescriptor descriptor, object value,
+            object historyRoot, RcfArchiveItem historyArchiveItem, Pure3DFile historyStandaloneFile)
+        {
+            this._isApplyingUndoRedo = true;
+            try { descriptor.SetValue(target, CloneHistoryValue(value)); }
+            finally { this._isApplyingUndoRedo = false; }
+            if (this.propGrid != null) this.propGrid.Refresh();
+
+            // Apply dirty-state changes to the document that originally owned the edited
+            // object, not whichever node happens to be selected when Ctrl+Z/Ctrl+Y is used.
+            RcfArchiveItem rootArchiveItem = historyRoot as RcfArchiveItem;
+            if (rootArchiveItem != null)
+            {
+                if (rootArchiveItem.Entry != null && rootArchiveItem.Metadata != null)
+                    rootArchiveItem.Entry.Hash = Utils.RCFStringHash((rootArchiveItem.Metadata.Name ?? string.Empty).TrimEnd('\0'));
+                this._rcfHasUnsavedChanges = true;
+                if (ReferenceEquals(rootArchiveItem.Owner, this._rcfFile))
+                    this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " [RCF] *";
+                this.RefreshResourceTypeFilterOptions(true);
+                this.SaveSettings();
+                this.RefreshRcfTree();
+                this.UpdateMainToolbarState();
+                return;
+            }
+
+            if (historyArchiveItem != null)
+            {
+                if (historyArchiveItem.ParsedFile == null)
+                    throw new InvalidOperationException("Запись RCF больше не содержит загруженную модель для отмены изменения.");
+                historyArchiveItem.ParsedFileModified = true;
+                this.SerializeRcfItem(historyArchiveItem);
+                this.UpdateTreeNodeTextForTag(historyRoot);
+                this._rcfHasUnsavedChanges = true;
+                if (ReferenceEquals(historyArchiveItem.Owner, this._rcfFile))
+                    this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " [RCF] *";
+                this.UpdateMainToolbarState();
+                return;
+            }
+
+            if (historyStandaloneFile != null && ReferenceEquals(historyStandaloneFile, this._file))
+            {
+                this._fileHasUnsavedChanges = true;
+                if (!string.IsNullOrEmpty(this._currentFilePath))
+                    this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " *";
+                this.UpdateTreeNodeTextForTag(historyRoot);
+            }
+            this.UpdateMainToolbarState();
+        }
+
+        private void UpdateTreeNodeTextForTag(object tag)
+        {
+            if (tag == null || this.nodeTreeView == null) return;
+            string text = tag.ToString();
+            Action<TreeNodeCollection> update = null;
+            update = nodes =>
+            {
+                foreach (TreeNode node in nodes)
+                {
+                    if (ReferenceEquals(node.Tag, tag)) node.Text = text;
+                    if (node.Nodes.Count > 0) update(node.Nodes);
+                }
+            };
+            update(this.nodeTreeView.Nodes);
+        }
+
+        private void MarkPropertyGridDocumentModified()
+        {
+            if (this._rcfFile == null)
+            {
+                if (this._file != null && this.propGrid.SelectedObject is BaseNode)
+                {
+                    this._fileHasUnsavedChanges = true;
+                    if (!string.IsNullOrEmpty(this._currentFilePath))
+                        this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " *";
+                }
+                return;
+            }
+            var item = this.propGrid.SelectedObject as RcfArchiveItem;
+            if (item != null)
+            {
+                this._rcfHasUnsavedChanges = true;
+                if (item.Entry != null && item.Metadata != null)
+                    item.Entry.Hash = Utils.RCFStringHash((item.Metadata.Name ?? string.Empty).TrimEnd('\0'));
+                this.BeginInvoke(new Action(() =>
+                {
+                    this.RefreshResourceTypeFilterOptions(true);
+                    this.RefreshRcfTree(item);
+                }));
+                return;
+            }
+            var changedNode = this.propGrid.SelectedObject as BaseNode;
+            if (changedNode != null && this._activeRcfItem != null)
+            {
+                TreeNode selectedNode = this.nodeTreeView.SelectedNode;
+                if (selectedNode != null && ReferenceEquals(selectedNode.Tag, changedNode))
+                    selectedNode.Text = changedNode.ToString();
+                this._activeRcfItem.ParsedFileModified = true;
+                this._rcfHasUnsavedChanges = true;
+                try { this.SyncActiveRcfEntry(); }
+                catch (Exception ex)
+                {
+                    this.ShowLocalizedMessageBoxById(this, "message.rcf.syncP3dFailed", "Не удалось синхронизировать P3D внутри RCF: {0}",
+                        "caption.rcf", "RCF", MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+                }
+            }
+        }
+
+        private void PushUndoRedoAction(UndoRedoAction action)
+        {
+            if (action == null || this._isApplyingUndoRedo) return;
+            this._undoHistory.Push(action);
+            this._redoHistory.Clear();
+            this.UpdateUndoRedoMenuState();
+        }
+
+        private void ClearUndoRedoHistory()
+        {
+            this._undoHistory.Clear();
+            this._redoHistory.Clear();
+            this.UpdateUndoRedoMenuState();
+        }
+
+        private void UndoLastChange()
+        {
+            if (this._undoHistory.Count == 0) return;
+            UndoRedoAction action = this._undoHistory.Pop();
+            this._executingUndoRedoAction = action;
+            try
+            {
+                action.Undo();
+                this._redoHistory.Push(action);
+            }
+            catch (Exception ex)
+            {
+                this._undoHistory.Push(action);
+                this.ShowLocalizedMessageBoxById(this, "message.undo.failed", "Не удалось отменить изменение: {0}",
+                    "caption.undo", "Отмена", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+            }
+            finally { this._executingUndoRedoAction = null; }
+            this.UpdateUndoRedoMenuState();
+        }
+
+        private void RedoLastChange()
+        {
+            if (this._redoHistory.Count == 0) return;
+            UndoRedoAction action = this._redoHistory.Pop();
+            this._executingUndoRedoAction = action;
+            try
+            {
+                action.Redo();
+                this._undoHistory.Push(action);
+            }
+            catch (Exception ex)
+            {
+                this._redoHistory.Push(action);
+                this.ShowLocalizedMessageBoxById(this, "message.redo.failed", "Не удалось повторить изменение: {0}",
+                    "caption.redo", "Повтор", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+            }
+            finally { this._executingUndoRedoAction = null; }
+            this.UpdateUndoRedoMenuState();
+        }
+
+        private string TranslateUndoRedoDescription(string description)
+        {
+            if (string.IsNullOrEmpty(description)) return string.Empty;
+
+            // Translate only the UI-owned operation prefix. The rest of the description may
+            // contain an actual RCF entry name or a PropertyGrid display name and must remain data.
+            string translated = UiLocalization.TranslateIdPrefixInText(description,
+                "undo.description.addFilesRcfPrefix", "Добавление файлов в RCF", this._uiLanguage);
+            if (!string.Equals(translated, description, StringComparison.Ordinal)) return translated;
+            translated = UiLocalization.TranslateIdPrefixInText(description,
+                "undo.description.addSectionsPrefix", "Добавление секций в ", this._uiLanguage);
+            if (!string.Equals(translated, description, StringComparison.Ordinal)) return translated;
+            translated = UiLocalization.TranslateIdPrefixInText(description,
+                "undo.description.importRawChunkPrefix", "Импорт сырого чанка ", this._uiLanguage);
+            if (!string.Equals(translated, description, StringComparison.Ordinal)) return translated;
+            translated = UiLocalization.TranslateIdPrefixInText(description,
+                "undo.description.replaceEntryPrefix", "Замена записи ", this._uiLanguage);
+            if (!string.Equals(translated, description, StringComparison.Ordinal)) return translated;
+            translated = UiLocalization.TranslateIdPrefixInText(description,
+                "undo.description.importResourcePrefix", "Импорт ресурса ", this._uiLanguage);
+            if (!string.Equals(translated, description, StringComparison.Ordinal)) return translated;
+            translated = UiLocalization.TranslateIdPrefixInText(description,
+                "undo.description.changePrefix", "Изменение: ", this._uiLanguage);
+            return translated;
+        }
+
+        private void UpdateUndoRedoMenuState()
+        {
+            if (this.undoMenuItem != null)
+            {
+                this.undoMenuItem.Enabled = this._undoHistory.Count > 0;
+                this.undoMenuItem.Text = this._undoHistory.Count > 0
+                    ? string.Format(UiLocalization.TranslateId("cmd.edit.undo.withDescription", "Отменить: {0}", this._uiLanguage),
+                        this.TranslateUndoRedoDescription(this._undoHistory.Peek().Description))
+                    : UiLocalization.TranslateId("cmd.edit.undo", "Отменить", this._uiLanguage);
+            }
+            if (this.redoMenuItem != null)
+            {
+                this.redoMenuItem.Enabled = this._redoHistory.Count > 0;
+                this.redoMenuItem.Text = this._redoHistory.Count > 0
+                    ? string.Format(UiLocalization.TranslateId("cmd.edit.redo.withDescription", "Повторить: {0}", this._uiLanguage),
+                        this.TranslateUndoRedoDescription(this._redoHistory.Peek().Description))
+                    : UiLocalization.TranslateId("cmd.edit.redo", "Повторить", this._uiLanguage);
+            }
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            Keys modifiers = keyData & Keys.Modifiers;
+            bool searchEditorFocused = this.searchTextBox != null && this.searchTextBox.TextBox != null && this.searchTextBox.TextBox.Focused;
+            if (searchEditorFocused &&
+                ((modifiers == Keys.Control && (key == Keys.A || key == Keys.Z || key == Keys.Y)) ||
+                 (modifiers == (Keys.Control | Keys.Shift) && key == Keys.Z)))
+                return base.ProcessCmdKey(ref msg, keyData);
+
+            if (modifiers == Keys.Control && key == Keys.O) { this.OnOpenDialog(); return true; }
+            if (modifiers == Keys.Control && key == Keys.N) { this.ShowCreateNewMenu(); return true; }
+            if (modifiers == Keys.Control && key == Keys.A) { this.OnAddFilesToCurrentDocument(); return true; }
+            if (modifiers == Keys.Control && key == Keys.S) { this.OnSaveFile(false); return true; }
+            if (modifiers == (Keys.Control | Keys.Shift) && key == Keys.S) { this.OnSaveFile(true); return true; }
+            if (modifiers == Keys.Control && key == Keys.Z) { this.UndoLastChange(); return true; }
+            if (modifiers == (Keys.Control | Keys.Shift) && key == Keys.Z) { this.RedoLastChange(); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private sealed class UndoRedoAction
+        {
+            public string Description { get; private set; }
+            public Action Undo { get; private set; }
+            public Action Redo { get; private set; }
+            public RcfArchiveItem ArchiveItemContext { get; private set; }
+            public UndoRedoAction(string description, Action undo, Action redo, RcfArchiveItem archiveItemContext = null)
+            {
+                this.Description = description ?? "Изменение";
+                this.Undo = undo ?? (() => { });
+                this.Redo = redo ?? (() => { });
+                this.ArchiveItemContext = archiveItemContext;
+            }
+        }
+
+        private bool HasUndoRedoHistoryForItem(RcfArchiveItem item)
+        {
+            if (item == null) return false;
+            if (this._executingUndoRedoAction != null && ReferenceEquals(this._executingUndoRedoAction.ArchiveItemContext, item))
+                return true;
+            return this._undoHistory.Any(action => ReferenceEquals(action.ArchiveItemContext, item)) ||
+                   this._redoHistory.Any(action => ReferenceEquals(action.ArchiveItemContext, item));
+        }
+
+        private void SyncActiveRcfEntry()
+        {
+            this.SerializeRcfItem(this._activeRcfItem);
         }
 
         private void CacheNodesMetadata()
@@ -495,8 +6157,94 @@ namespace PrototypeUltimateTool
             }
         }
 
+        private object[] CaptureSelectedTreeTags()
+        {
+            if (this.nodeTreeView == null) return new object[0];
+            return this.nodeTreeView.SelectedNodes
+                .Where(node => node != null && node.Tag != null)
+                .Select(node => node.Tag)
+                .ToArray();
+        }
+
+        private object CaptureActiveTreeTag()
+        {
+            return this.nodeTreeView != null && this.nodeTreeView.SelectedNode != null
+                ? this.nodeTreeView.SelectedNode.Tag : null;
+        }
+
+        private void RestoreTreeSelection(object[] selectedTags, object activeTag, TreeNode preferredActiveNode)
+        {
+            if (this.nodeTreeView == null) return;
+
+            List<TreeNode> allNodes = new List<TreeNode>();
+            foreach (TreeNode root in this.nodeTreeView.Nodes)
+                CollectTreeNodes(root, allNodes);
+
+            var restoredSelection = new List<TreeNode>();
+            if (selectedTags != null)
+            {
+                foreach (TreeNode node in allNodes)
+                {
+                    if (node.Tag == null) continue;
+                    if (selectedTags.Any(tag => TreeTagsMatch(tag, node.Tag)))
+                        restoredSelection.Add(node);
+                }
+            }
+
+            TreeNode activeNode = preferredActiveNode != null && preferredActiveNode.TreeView == this.nodeTreeView
+                ? preferredActiveNode
+                : allNodes.FirstOrDefault(node => node.Tag != null && TreeTagsMatch(activeTag, node.Tag));
+
+            if (preferredActiveNode != null && preferredActiveNode.TreeView == this.nodeTreeView &&
+                !restoredSelection.Contains(preferredActiveNode))
+                restoredSelection.Add(preferredActiveNode);
+
+            this.nodeTreeView.SetSelectedNodes(restoredSelection, activeNode);
+        }
+
+        private static void CollectTreeNodes(TreeNode node, List<TreeNode> result)
+        {
+            if (node == null) return;
+            result.Add(node);
+            foreach (TreeNode child in node.Nodes) CollectTreeNodes(child, result);
+        }
+
+        private static bool TreeTagsMatch(object first, object second)
+        {
+            if (ReferenceEquals(first, second)) return true;
+            if (first == null || second == null) return false;
+
+            RcfFolderItem firstFolder = first as RcfFolderItem;
+            RcfFolderItem secondFolder = second as RcfFolderItem;
+            if (firstFolder != null && secondFolder != null)
+                return string.Equals(firstFolder.Path, secondFolder.Path, StringComparison.OrdinalIgnoreCase);
+
+            RcfTextureSearchHit firstHit = first as RcfTextureSearchHit;
+            RcfTextureSearchHit secondHit = second as RcfTextureSearchHit;
+            if (firstHit != null && secondHit != null)
+                return ReferenceEquals(firstHit.Item, secondHit.Item) &&
+                    firstHit.PathIndices.SequenceEqual(secondHit.PathIndices);
+
+            return false;
+        }
+
         private void RefreshTree()
         {
+            if (this._rcfFile == null)
+                this.CancelPendingRcfTreeBuild();
+
+            // Do not rebuild the type ComboBox while it is processing a selection.
+            // Clearing/re-adding Items from this call re-entered the native ToolStripComboBox
+            // dropdown, which made the list appear to open in multiple stages. Filter options
+            // are refreshed explicitly when the current document/archive changes.
+            if (this._rcfFile != null)
+            {
+                this.RefreshRcfTree();
+                this.UpdateMainToolbarState();
+                return;
+            }
+            object[] previouslySelectedTags = this.CaptureSelectedTreeTags();
+            object previouslyActiveTag = this.CaptureActiveTreeTag();
             SendMessage(this.nodeTreeView.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
             this.nodeTreeView.BeginUpdate();
             this.nodeTreeView.Nodes.Clear();
@@ -505,10 +6253,14 @@ namespace PrototypeUltimateTool
             {
                 IEnumerable<NodeCacheItem> list = this._cachedNodes;
 
-                if (this._onlyTextures) list = list.Where(item => item.IsTexture);
-
                 string query = this.searchTextBox.Text.Trim();
-                if (!string.IsNullOrEmpty(query)) list = list.Where(item => item.Matches(query));
+                if (this._onlyTextures)
+                    list = list.Where(item => NodeTreeContainsTextureMatch(item.Node, query));
+                else if (!string.IsNullOrEmpty(this._p3dNodeTypeFilter))
+                    list = list.Where(item => string.Equals(item.Node.GetType().Name, this._p3dNodeTypeFilter, StringComparison.OrdinalIgnoreCase) &&
+                        (string.IsNullOrEmpty(query) || item.Matches(query)));
+                else if (!string.IsNullOrEmpty(query))
+                    list = list.Where(item => item.Matches(query));
 
                 switch (this.sortComboBox.SelectedIndex)
                 {
@@ -524,10 +6276,21 @@ namespace PrototypeUltimateTool
                 List<TreeNode> treeNodes = new List<TreeNode>();
                 foreach (NodeCacheItem item in list)
                 {
-                    TreeNode tn = new TreeNode(item.DisplayText) { Tag = item.Node };
+                    if (this._onlyTextures)
+                    {
+                        AddFilteredP3DNode(this.nodeTreeView.Nodes, item.Node, query);
+                        continue;
+                    }
+
+                    string imageKey = GetBaseNodeTreeImageKey(item.Node);
+                    TreeNode tn = new TreeNode(item.DisplayText)
+                    {
+                        Tag = item.Node, ImageKey = imageKey, SelectedImageKey = imageKey,
+                        ToolTipText = item.Node.GetType().Name + "\n" + item.DisplayText + "\n" + UiLocalization.TranslateId("tree.tooltip.p3dDepthPrefix", "Глубина P3D: ", this._uiLanguage) + "1"
+                    };
                     if (item.Node.Children != null && item.Node.Children.Count > 0)
                     {
-                        tn.Nodes.Add(new TreeNode { Tag = null, Text = "Загрузка..." });
+                        tn.Nodes.Add(new TreeNode { Tag = null, Text = UiLocalization.TranslateId("tree.loading", "Загрузка...", this._uiLanguage) });
                     }
                     treeNodes.Add(tn);
                 }
@@ -537,12 +6300,33 @@ namespace PrototypeUltimateTool
 
             this.nodeTreeView.EndUpdate();
             SendMessage(this.nodeTreeView.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+            if (this._onlyTextures) this.nodeTreeView.ExpandAll();
+            this.RestoreTreeSelection(previouslySelectedTags, previouslyActiveTag, null);
+            this.ApplyTreeNodeLocalization(this.nodeTreeView.Nodes, this._uiLanguage);
             this.nodeTreeView.Invalidate();
+            this.UpdateMainToolbarState();
         }
 
         private void OnNodeBeforeExpand(TreeNode node)
         {
             if (node == null || node.Nodes.Count == 0) return;
+
+            var archiveItem = node.Tag as RcfArchiveItem;
+            if (archiveItem != null)
+            {
+                if (this._onlyTextures)
+                {
+                    List<RcfTextureHitInfo> hits;
+                    if (this._visibleRcfTextureHits.TryGetValue(archiveItem, out hits) &&
+                        node.Nodes.Count > 0 && node.Nodes[0].Tag == null)
+                        this.PopulateFilteredRcfTextureNodes(node, archiveItem, hits);
+                    return;
+                }
+                if (node.Nodes.Count == 0 || node.Nodes[0].Tag == null)
+                    this.PopulateRcfEntryNode(node, archiveItem);
+                return;
+            }
+            if (node.Tag is RcfFolderItem) return;
 
             if (node.Nodes[0].Tag == null)
             {
@@ -553,14 +6337,20 @@ namespace PrototypeUltimateTool
                     List<TreeNode> children = new List<TreeNode>();
                     foreach (BaseNode child in baseNode.Children)
                     {
-                        TreeNode childTn = new TreeNode(child.ToString()) { Tag = child };
+                        string imageKey = GetBaseNodeTreeImageKey(child);
+                        TreeNode childTn = new TreeNode(child.ToString())
+                        {
+                            Tag = child, ImageKey = imageKey, SelectedImageKey = imageKey,
+                            ToolTipText = child.GetType().Name + "\n" + child.ToString() + "\n" + UiLocalization.TranslateId("tree.tooltip.p3dDepthPrefix", "Глубина P3D: ", this._uiLanguage) + (node.Level + (this._rcfFile != null ? 1 : 2))
+                        };
                         if (child.Children != null && child.Children.Count > 0)
                         {
-                            childTn.Nodes.Add(new TreeNode { Tag = null, Text = "Загрузка..." });
+                            childTn.Nodes.Add(new TreeNode { Tag = null, Text = UiLocalization.TranslateId("tree.loading", "Загрузка...", this._uiLanguage) });
                         }
                         children.Add(childTn);
                     }
                     node.Nodes.AddRange(children.ToArray());
+                    this.ApplyTreeNodeLocalization(node.Nodes, this._uiLanguage);
                 }
             }
         }
@@ -627,8 +6417,20 @@ namespace PrototypeUltimateTool
 
         private void ReloadPreview()
         {
-            var node = this.nodeTreeView.SelectedNode != null ? this.nodeTreeView.SelectedNode.Tag as BaseNode : null;
-            this.OnNodeSelected(node);
+            // Re-run the normal tree-selection pipeline instead of assuming that the
+            // selected TreeNode.Tag is always a BaseNode. In the RCF texture-index view
+            // the selected node is an RcfTextureSearchHit; casting it directly to BaseNode
+            // produced null, cleared the preview and required the user to select the texture
+            // again. OnTreeNodeSelected resolves the hit back to its actual texture node.
+            TreeNode selectedTreeNode = this.nodeTreeView != null ? this.nodeTreeView.SelectedNode : null;
+            if (selectedTreeNode == null)
+            {
+                this.OnNodeSelected(null);
+                return;
+            }
+
+            this.OnTreeNodeSelected(selectedTreeNode);
+            this.UpdateMainToolbarState();
         }
 
         private void SetChannels(bool r, bool g, bool b, bool a)
@@ -665,28 +6467,630 @@ namespace PrototypeUltimateTool
             this.resolutionLabel.Text = $"{this._currentSourceBmp.Width} × {this._currentSourceBmp.Height}";
         }
 
+        private void ShowCreateNewMenu()
+        {
+            if (this.fileMenuItem == null || this.createFileMenuItem == null) return;
+            try
+            {
+                this.fileMenuItem.ShowDropDown();
+                this.createFileMenuItem.ShowDropDown();
+            }
+            catch (InvalidOperationException) { /* The menu may be closing while the shortcut is handled. */ }
+        }
+
+        private void CreateNewP3DDocument()
+        {
+            this.CreateNewP3DDocument("Untitled.p3d");
+        }
+
+        private void CreateNewP3DDocument(string suggestedFileName)
+        {
+            if (!this.PrepareToSwitchDocument(null)) return;
+            this.CancelPendingRcfTextureScan();
+            this.CancelPendingRcfEmbeddedP3DTypeScan();
+            this.ClearNodePreview();
+            this.propGrid.SelectedObject = null;
+            this._rcfFile = null;
+            this._rcfItems.Clear();
+            this._activeRcfItem = null;
+            this._rcfHasUnsavedChanges = false;
+            this._file = new Pure3DFile { GamePicked = PrototypeGame.Any, Endian = Endian.Little };
+            this._currentFilePath = null;
+            this._suggestedNewP3DSaveName = string.IsNullOrWhiteSpace(suggestedFileName) ? "Untitled.p3d" : suggestedFileName;
+            this._fileHasUnsavedChanges = true;
+            this._rcfSmartExpansionPending = false;
+            this._onlyTextures = false;
+            this._archiveExtensionFilter = string.Empty;
+            this._archiveP3DNodeTypeFilter = string.Empty;
+            this._p3dNodeTypeFilter = string.Empty;
+            this._cachedNodes.Clear();
+            this.ClearUndoRedoHistory();
+            this.RefreshResourceTypeFilterOptions(false);
+            string unsavedP3DName = this._suggestedNewP3DSaveName.StartsWith("Untitled", StringComparison.OrdinalIgnoreCase)
+                ? "Без имени" + this._suggestedNewP3DSaveName.Substring("Untitled".Length)
+                : this._suggestedNewP3DSaveName;
+            this.Text = "Prototype Ultimate Tool - " + unsavedP3DName + " *";
+            this.RefreshTree();
+            this.UpdateMainToolbarState();
+        }
+
+        private void CreateNewRcfDocument()
+        {
+            if (!this.PrepareToSwitchDocument(null)) return;
+            this.CancelPendingRcfTextureScan();
+            this.ClearNodePreview();
+            this.propGrid.SelectedObject = null;
+            this._file = null;
+            this._rcfFile = new CementFile { Endian = Endian.Little, MajorVersion = 2, MinorVersion = 1 };
+            this._rcfItems.Clear();
+            this._activeRcfItem = null;
+            this._fileHasUnsavedChanges = false;
+            this._rcfHasUnsavedChanges = true;
+            this._currentFilePath = null;
+            this._rcfSmartExpansionPending = false;
+            this._onlyTextures = false;
+            this._archiveExtensionFilter = string.Empty;
+            this._archiveP3DNodeTypeFilter = string.Empty;
+            this._p3dNodeTypeFilter = string.Empty;
+            this._cachedNodes.Clear();
+            this.ClearUndoRedoHistory();
+            this.BuildRcfArchiveItems();
+            this.RefreshResourceTypeFilterOptions(false);
+            this.Text = "Prototype Ultimate Tool - Без имени.rcf [RCF] *";
+            this.RefreshTree();
+            this.UpdateMainToolbarState();
+        }
+
+        private void OnAddFilesToCurrentDocument()
+        {
+            TreeNode selected = this.nodeTreeView == null ? null : this.nodeTreeView.SelectedNode;
+            if (selected != null && selected.Tag is BaseNode)
+            {
+                RcfArchiveItem owner = this.FindRcfEntryAncestor(selected);
+                if (owner != null)
+                {
+                    if (this.EnsureRcfEntryParsed(owner) && owner.ParsedFile != null)
+                        this.AddFilesToP3DDocument(owner.ParsedFile, owner);
+                    else
+                        this.ShowLocalizedMessageBoxById(this, "message.import.selectedRcf.failed",
+                            "Не удалось открыть P3D-запись выбранного RCF.", "caption.import.addFiles", "Добавление файлов",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                if (this._file != null)
+                {
+                    this.AddFilesToP3DDocument(this._file, null);
+                    return;
+                }
+            }
+            if (this._rcfFile != null)
+            {
+                this.AddFilesToRcfArchive();
+                return;
+            }
+            if (this._file != null)
+            {
+                this.AddFilesToP3DDocument(this._file, null);
+                return;
+            }
+            this.ShowLocalizedMessageBoxById(this, "message.import.document.required",
+                "Сначала создайте или откройте P3D-документ либо RCF-архив.", "caption.import.addFiles", "Добавление файлов",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void AddFilesToRcfArchive()
+        {
+            if (this._rcfFile == null) return;
+            using (OpenFileDialog dialog = new OpenFileDialog
+            {
+                Title = UiLocalization.TranslateId("dialog.import.rcf.title", "Добавить файлы в корень открытого RCF-архива", this._uiLanguage),
+                Filter = UiLocalization.TranslateId("filter.allFiles", "Все файлы (*.*)|*.*", this._uiLanguage),
+                Multiselect = true,
+                CheckFileExists = true
+            })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                var existingNames = new HashSet<string>(this._rcfItems.Select(item => item.Name), StringComparer.OrdinalIgnoreCase);
+                int added = 0, skipped = 0;
+                var errors = new List<string>();
+                var addedEntries = new List<Entry>();
+                var addedMetadatas = new List<Metadata>();
+                foreach (string sourcePath in dialog.FileNames)
+                {
+                    string archiveName = Path.GetFileName(sourcePath);
+                    if (string.IsNullOrWhiteSpace(archiveName) || existingNames.Contains(archiveName))
+                    {
+                        skipped++;
+                        continue;
+                    }
+                    try
+                    {
+                        byte[] data = File.ReadAllBytes(sourcePath);
+                        var entry = new Entry
+                        {
+                            Hash = Utils.RCFStringHash(archiveName),
+                            Data = data,
+                            Size = (uint)data.Length
+                        };
+                        var metadata = new Metadata
+                        {
+                            Date = DateTime.Now.GetUnixEpoch(),
+                            Alignment = 2048,
+                            Name = archiveName
+                        };
+                        this._rcfFile.Entries.Add(entry);
+                        this._rcfFile.Metadatas.Add(metadata);
+                        addedEntries.Add(entry);
+                        addedMetadatas.Add(metadata);
+                        existingNames.Add(archiveName);
+                        added++;
+                    }
+                    catch (Exception ex) { errors.Add(Path.GetFileName(sourcePath) + ": " + ex.Message); }
+                }
+                if (added > 0)
+                {
+                    // Rebuilding RCF item wrappers invalidates older history contexts. Clear them,
+                    // then keep this structural change undoable as one operation.
+                    this.ClearUndoRedoHistory();
+                    Action refreshAfterArchiveAddition = () =>
+                    {
+                        this._rcfHasUnsavedChanges = true;
+                        this.BuildRcfArchiveItems();
+                        this.RefreshResourceTypeFilterOptions(true);
+                        this.RefreshTree();
+                        this.UpdateMainToolbarState();
+                        this.Text = "Prototype Ultimate Tool - " + (string.IsNullOrEmpty(this._currentFilePath) ? "Без имени.rcf" : Path.GetFileName(this._currentFilePath)) + " [RCF] *";
+                        this.StartRcfAnimationCatalogScanWithProgress();
+                    };
+                    this.PushUndoRedoAction(new UndoRedoAction("Добавление файлов в RCF",
+                        () =>
+                        {
+                            foreach (Entry entry in addedEntries) this._rcfFile.Entries.Remove(entry);
+                            foreach (Metadata metadata in addedMetadatas) this._rcfFile.Metadatas.Remove(metadata);
+                            refreshAfterArchiveAddition();
+                        },
+                        () =>
+                        {
+                            foreach (Entry entry in addedEntries) if (!this._rcfFile.Entries.Contains(entry)) this._rcfFile.Entries.Add(entry);
+                            foreach (Metadata metadata in addedMetadatas) if (!this._rcfFile.Metadatas.Contains(metadata)) this._rcfFile.Metadatas.Add(metadata);
+                            refreshAfterArchiveAddition();
+                        }));
+                    refreshAfterArchiveAddition();
+                }
+                string summary = this.FormatLocalizedText("message.import.rcf.added", "Добавлено в RCF: {0}.", added);
+                if (skipped > 0)
+                    summary += "\n" + this.FormatLocalizedText("message.import.rcf.skipped",
+                        "Пропущено (имена уже существуют или некорректны): {0}.", skipped);
+                if (errors.Count > 0)
+                {
+                    summary += "\n" + this.FormatLocalizedText("message.common.errorsCount", "Ошибки: {0}.", errors.Count);
+                    summary += "\n" + string.Join("\n", errors.Take(8));
+                    if (errors.Count > 8) summary += this.FormatLocalizedText("message.common.andMore", "\n… и ещё {0}.", errors.Count - 8);
+                }
+                this.ShowLocalizedMessageBoxText(this, summary, "caption.import.rcf", "Добавление файлов в RCF",
+                    MessageBoxButtons.OK, errors.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            }
+        }
+
+        private async void AddFilesToP3DDocument(Pure3DFile targetP3D, RcfArchiveItem ownerArchiveItem)
+        {
+            if (targetP3D == null) return;
+
+            string[] sourceFiles;
+            using (OpenFileDialog dialog = new OpenFileDialog
+            {
+                Title = UiLocalization.TranslateId("dialog.import.p3d.title", "Добавить P3D-файлы или сырые P3D-секции", this._uiLanguage),
+                Filter = UiLocalization.TranslateId("filter.p3dSectionsAndRawChunks", "Pure3D/сырые секции (*.p3d;*.rz;*.p3dchunk-*)|*.p3d;*.rz;*.p3dchunk-*|Все файлы (*.*)|*.*", this._uiLanguage),
+                Multiselect = true,
+                CheckFileExists = true
+            })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                sourceFiles = dialog.FileNames;
+            }
+            sourceFiles = ApplyRawP3DChunkOrderManifest(sourceFiles);
+
+            var incomingNodes = new List<BaseNode>();
+            var errors = new List<string>();
+            int successfulFiles = 0;
+            long selectedInputBytes = 0;
+            foreach (string sourcePath in sourceFiles)
+            {
+                try
+                {
+                    long fileLength = new FileInfo(sourcePath).Length;
+                    selectedInputBytes = selectedInputBytes > long.MaxValue - fileLength ? long.MaxValue : selectedInputBytes + fileLength;
+                }
+                catch { selectedInputBytes = long.MaxValue; }
+            }
+            // Full serialized undo snapshots duplicate the entire P3D graph in memory. A bulk
+            // raw-chunk import can contain hundreds of chunks and easily exhaust a 32-bit process.
+            // Keep snapshot-based Undo for ordinary-sized operations, but do not risk a process
+            // crash merely to capture one history item for a very large import batch.
+            bool captureUndoSnapshot = sourceFiles.Length <= 128 && selectedInputBytes <= 64L * 1024L * 1024L;
+            if (!captureUndoSnapshot)
+                WriteApplicationLog("P3D_IMPORT_UNDO_SKIPPED", "Снимок Undo пропущен для крупного пакетного импорта; files=" +
+                    sourceFiles.Length + "; inputBytes=" + selectedInputBytes + "; reason=memory safety");
+            Endian targetEndian = targetP3D.Endian;
+            PrototypeGame targetGame = targetP3D.GamePicked;
+            string ownerDescription = ownerArchiveItem == null ? "standalone P3D" : ownerArchiveItem.Name;
+            Stopwatch importTimer = Stopwatch.StartNew();
+            WriteApplicationLog("P3D_IMPORT_BATCH_BEGIN", "Начат импорт файлов в P3D; files=" + sourceFiles.Length +
+                "; targetEndian=" + targetEndian + "; owner=" + ownerDescription);
+
+            bool wasEnabled = this.Enabled;
+            Cursor previousCursor = this.Cursor;
+            string previousTitle = this.Text;
+            this.Enabled = false;
+            this.UseWaitCursor = true;
+            this.Cursor = Cursors.WaitCursor;
+            this.Text = previousTitle + " — Импорт секций...";
+
+            try
+            {
+                // Parsing hundreds of chunks on the WinForms STA thread can stop Windows message
+                // pumping long enough to trigger ContextSwitchDeadlock. Parse on a worker and only
+                // mutate the open document/tree after the await returns to the UI thread.
+                await Task.Run(() =>
+                {
+                    foreach (string sourcePath in sourceFiles)
+                    {
+                        try
+                        {
+                            long sourceLength = new FileInfo(sourcePath).Length;
+                            WriteApplicationLog("P3D_IMPORT_FILE_BEGIN", "Начата обработка импортируемого файла: " + sourcePath +
+                                "; bytes=" + sourceLength + "; rawChunk=" + IsRawP3DChunkFile(sourcePath));
+                            var incoming = new Pure3DFile { GamePicked = targetGame, Endian = targetEndian };
+                            using (FileStream input = File.OpenRead(sourcePath))
+                            {
+                                Stream data = input;
+                                MemoryStream decoded = null;
+                                try
+                                {
+                                    if (Utils.IsRZFile(sourcePath))
+                                    {
+                                        decoded = new MemoryStream();
+                                        Utils.DecompressRZ(input, decoded);
+                                        decoded.Position = 0;
+                                        data = decoded;
+                                    }
+
+                                    bool isRawChunkFile = IsRawP3DChunkFile(sourcePath);
+                                    bool isP3DContainerFile = Path.GetExtension(sourcePath).Equals(".p3d", StringComparison.OrdinalIgnoreCase) || Utils.IsRZFile(sourcePath);
+                                    if (!isRawChunkFile && !isP3DContainerFile)
+                                        throw new InvalidDataException("Это не сырой P3D-чанк и не контейнер P3D. Для импорта нужен файл *.p3dchunk-* либо *.p3d/*.p3d.rz; обычный экспорт ресурса (.bin/.dds/.obj) не содержит заголовок P3D-секции.");
+
+                                    if (isRawChunkFile)
+                                    {
+                                        Endian detectedEndian;
+                                        BaseNode rawNode = DeserializeRawP3DChunk(data, targetEndian, targetGame, sourcePath, out detectedEndian);
+                                        incoming.Endian = targetEndian;
+                                        incoming.Nodes.Add(rawNode);
+                                        WriteApplicationLog("RAW_CHUNK_IMPORT_OK", "Разобран сырой чанк: " + sourcePath +
+                                            "; type=0x" + rawNode.TypeId.ToString("X8") + "; node=" + rawNode.GetType().Name +
+                                            "; sourceEndian=" + detectedEndian + "; targetEndian=" + targetEndian + "; bytes=" + data.Length);
+                                    }
+                                    else
+                                    {
+                                        incoming.Deserialize(data, targetEndian);
+                                        WriteApplicationLog("P3D_INPUT_IMPORT_OK", "Разобран P3D: " + sourcePath +
+                                            "; rootChunks=" + incoming.Nodes.Count + "; endian=" + incoming.Endian + "; bytes=" + data.Length);
+                                    }
+                                }
+                                finally
+                                {
+                                    if (decoded != null) decoded.Dispose();
+                                }
+                            }
+
+                            if (incoming.Nodes.Count == 0)
+                                throw new InvalidDataException("В файле нет корневых P3D-секций.");
+                            incomingNodes.AddRange(incoming.Nodes);
+                            successfulFiles++;
+                        }
+                        catch (Exception ex)
+                        {
+                            string errorText = Path.GetFileName(sourcePath) + ": " + ex.Message;
+                            errors.Add(errorText);
+                            WriteApplicationLog("P3D_IMPORT_FILE_ERROR", "Не удалось импортировать: " + sourcePath, ex);
+                        }
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                errors.Add("Ошибка фоновой обработки импорта: " + ex.Message);
+                WriteApplicationLog("P3D_IMPORT_WORKER_ERROR", "Фоновая обработка пакета импорта завершилась ошибкой.", ex);
+            }
+            finally
+            {
+                this.Enabled = wasEnabled;
+                this.UseWaitCursor = false;
+                this.Cursor = previousCursor;
+                this.Text = previousTitle;
+                if (!this.IsDisposed) this.Activate();
+            }
+
+            importTimer.Stop();
+            if (incomingNodes.Count == 0)
+            {
+                WriteApplicationLog("P3D_IMPORT_BATCH_END", "Импорт завершён без добавленных секций; selectedFiles=" + sourceFiles.Length +
+                    "; successfulFiles=" + successfulFiles + "; errors=" + errors.Count + "; elapsedMs=" + importTimer.ElapsedMilliseconds);
+                string errorDetails = string.Join("\n", errors.Take(8));
+                if (errors.Count > 8)
+                    errorDetails += this.FormatLocalizedText("message.common.andMore", "\n… и ещё {0}.", errors.Count - 8);
+                string failureSummary = this.FormatLocalizedText("message.import.p3d.noneAdded",
+                    "Не удалось добавить P3D-секции.\n{0}", errorDetails);
+                this.ShowLocalizedMessageBoxText(this, failureSummary, "caption.import.p3d", "Добавление в P3D",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            byte[] originalArchiveSnapshot = ownerArchiveItem != null && ownerArchiveItem.Entry != null && ownerArchiveItem.Entry.HasData
+                ? (byte[])ownerArchiveItem.Entry.Data.Clone() : null;
+            byte[] originalP3DSnapshot = ownerArchiveItem == null && captureUndoSnapshot ? this.SerializeCurrentP3DForHistory() : null;
+            bool previousFileDirty = this._fileHasUnsavedChanges;
+            bool previousRcfDirty = this._rcfHasUnsavedChanges;
+            try
+            {
+                foreach (BaseNode node in incomingNodes)
+                {
+                    node.ParentNode = null;
+                    targetP3D.Nodes.Add(node);
+                }
+
+                if (ownerArchiveItem != null)
+                {
+                    ownerArchiveItem.ParsedFileModified = true;
+                    this.InvalidateRcfEntryCaches(ownerArchiveItem);
+                    this.SerializeRcfItem(ownerArchiveItem);
+                    byte[] changed = captureUndoSnapshot && ownerArchiveItem.Entry.HasData
+                        ? (byte[])ownerArchiveItem.Entry.Data.Clone() : null;
+                    this._rcfHasUnsavedChanges = true;
+                    this.ClearUndoRedoHistory();
+                    if (originalArchiveSnapshot != null && changed != null)
+                        this.PushUndoRedoAction(new UndoRedoAction("Добавление секций в " + ownerArchiveItem.Name,
+                            () => this.ApplyRcfEntryHistorySnapshot(ownerArchiveItem, originalArchiveSnapshot),
+                            () => this.ApplyRcfEntryHistorySnapshot(ownerArchiveItem, changed), ownerArchiveItem));
+                    this.RefreshRcfTree(ownerArchiveItem);
+                    this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " [RCF] *";
+                }
+                else
+                {
+                    this._fileHasUnsavedChanges = true;
+                    byte[] changed = captureUndoSnapshot ? this.SerializeCurrentP3DForHistory() : null;
+                    this.ClearUndoRedoHistory();
+                    if (originalP3DSnapshot != null && changed != null)
+                        this.PushUndoRedoAction(new UndoRedoAction("Добавление секций в P3D",
+                            () => this.RestoreStandaloneP3DHistorySnapshot(originalP3DSnapshot),
+                            () => this.RestoreStandaloneP3DHistorySnapshot(changed)));
+                    this.CacheNodesMetadata();
+                    this.RefreshResourceTypeFilterOptions(true);
+                    this.RefreshTree();
+                    this.Text = "Prototype Ultimate Tool - " + (string.IsNullOrEmpty(this._currentFilePath) ? "Без имени.p3d" : Path.GetFileName(this._currentFilePath)) + " *";
+                }
+
+                string rootTypeSummary = string.Join(", ", incomingNodes
+                    .GroupBy(node => node == null ? "<null>" : node.GetType().Name, StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.Key + "=" + group.Count()));
+                WriteApplicationLog("P3D_IMPORT_ROOT_TYPE_COUNTS", "Типы добавленных корневых секций: " + rootTypeSummary);
+                string summary = this.FormatLocalizedText("message.import.p3d.summary",
+                    "Успешно обработано файлов: {0} из {1}.\nДобавлено корневых P3D-секций: {2}.",
+                    successfulFiles, sourceFiles.Length, incomingNodes.Count);
+                if (!string.IsNullOrEmpty(rootTypeSummary))
+                    summary += this.FormatLocalizedText("message.import.p3d.types", "\nТипы: {0}.", rootTypeSummary);
+                if (errors.Count > 0)
+                {
+                    string errorDetails = string.Join("\n", errors.Take(8));
+                    if (errors.Count > 8)
+                        errorDetails += this.FormatLocalizedText("message.common.andMore", "\n… и ещё {0}.", errors.Count - 8);
+                    summary += this.FormatLocalizedText("message.import.p3d.errors",
+                        "\nОшибок: {0}. Полный список записан в журнал (Справка → Журнал событий).\n\n{1}",
+                        errors.Count, errorDetails);
+                }
+                WriteApplicationLog("P3D_IMPORT_BATCH_END", "Импорт завершён; selectedFiles=" + sourceFiles.Length + "; successfulFiles=" + successfulFiles +
+                    "; addedRootChunks=" + incomingNodes.Count + "; errors=" + errors.Count + "; elapsedMs=" + importTimer.ElapsedMilliseconds);
+                this.ShowLocalizedMessageBoxText(this, summary, "caption.import.p3d", "Добавление в P3D",
+                    MessageBoxButtons.OK, errors.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                // UI-side finalization used to run outside the worker's catch path. A failure
+                // while serializing history, updating caches or rebuilding the tree could escape
+                // from this async-void handler and terminate the process.
+                WriteApplicationLog("P3D_IMPORT_COMMIT_ERROR", "Не удалось зафиксировать импорт в документе; попытка отката добавленных секций.", ex);
+                try
+                {
+                    foreach (BaseNode node in incomingNodes)
+                        targetP3D.Nodes.Remove(node);
+
+                    if (ownerArchiveItem != null && originalArchiveSnapshot != null && ownerArchiveItem.Entry != null)
+                    {
+                        ownerArchiveItem.Entry.Data = (byte[])originalArchiveSnapshot.Clone();
+                        ownerArchiveItem.Entry.Size = (uint)ownerArchiveItem.Entry.DataLength;
+                        ownerArchiveItem.ParsedFile = null;
+                        ownerArchiveItem.ParseAttempted = false;
+                        ownerArchiveItem.ParseError = null;
+                        ownerArchiveItem.ParsedFileModified = false;
+                        this.InvalidateRcfEntryCaches(ownerArchiveItem);
+                    }
+
+                    this._fileHasUnsavedChanges = previousFileDirty;
+                    this._rcfHasUnsavedChanges = previousRcfDirty;
+                    this.ClearUndoRedoHistory();
+                    if (ownerArchiveItem != null)
+                    {
+                        this.RefreshRcfTree(ownerArchiveItem);
+                    }
+                    else
+                    {
+                        this.CacheNodesMetadata();
+                        this.RefreshResourceTypeFilterOptions(true);
+                        this.RefreshTree();
+                    }
+                    this.Text = previousTitle;
+                }
+                catch (Exception rollbackEx)
+                {
+                    WriteApplicationLog("P3D_IMPORT_ROLLBACK_ERROR", "Не удалось полностью восстановить интерфейс после ошибки импорта.", rollbackEx);
+                }
+
+                WriteApplicationLog("P3D_IMPORT_BATCH_END", "Импорт отменён на этапе фиксации; selectedFiles=" + sourceFiles.Length +
+                    "; parsedFiles=" + successfulFiles + "; parsedRoots=" + incomingNodes.Count + "; elapsedMs=" + importTimer.ElapsedMilliseconds);
+                this.ShowLocalizedMessageBoxById(this, "message.import.p3d.commitError",
+                    "Импорт разобран, но не удалось безопасно добавить секции в документ. Изменения откатаны насколько возможно.\n\n{0}\n\nПодробности: Справка → Журнал событий.",
+                    "caption.import.error", "Ошибка импорта", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+            }
+        }
+
         private void OnOpenDialog()
         {
             using (OpenFileDialog ofd = new OpenFileDialog
             {
-                Filter = "Все форматы Prototype (*.p3d;*.rz;*.rcf)|*.p3d;*.rz;*.rcf|Pure3D (*.p3d)|*.p3d|Архивы RCF (*.rcf)|*.rcf|Все файлы (*.*)|*.*"
+                Title = UiLocalization.TranslateId("dialog.file.open.title", "Открыть файл Prototype", this._uiLanguage),
+                Filter = UiLocalization.TranslateId("filter.openPrototype", "Форматы Prototype (*.p3d;*.rz;*.rcf;*.p3dchunk-*)|*.p3d;*.rz;*.rcf;*.p3dchunk-*|Pure3D (*.p3d)|*.p3d|Архивы RCF (*.rcf)|*.rcf|Все файлы (*.*)|*.*", this._uiLanguage)
             })
             {
                 if (ofd.ShowDialog(this) == DialogResult.OK) OpenFile(ofd.FileName);
             }
         }
 
+        private static string EnsureP3DSaveExtension(string path, int filterIndex)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return path;
+            if (path.EndsWith(".p3d", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".p3d.rz", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".rz", StringComparison.OrdinalIgnoreCase)) return path;
+            string extension = filterIndex == 2 ? ".p3d.rz" : (filterIndex == 3 ? ".rz" : ".p3d");
+            return path + extension;
+        }
+
+        private static void SaveRcfArchiveAtomically(CementFile archive, string targetPath)
+        {
+            if (archive == null) throw new ArgumentNullException("archive");
+            if (string.IsNullOrWhiteSpace(targetPath)) throw new ArgumentException("A target path is required.", "targetPath");
+            string fullTargetPath = Path.GetFullPath(targetPath);
+            string directory = Path.GetDirectoryName(fullTargetPath);
+            string tempPath = Path.Combine(directory, "." + Path.GetFileName(fullTargetPath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            bool serialized = false;
+            try
+            {
+                using (FileStream output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+                    archive.Serialize(output);
+                serialized = true;
+
+                if (File.Exists(fullTargetPath))
+                {
+                    try
+                    {
+                        File.Replace(tempPath, fullTargetPath, null);
+                    }
+                    catch (PlatformNotSupportedException)
+                    {
+                        ReplaceRcfFileWithBackup(tempPath, fullTargetPath);
+                    }
+                    catch (IOException)
+                    {
+                        ReplaceRcfFileWithBackup(tempPath, fullTargetPath);
+                    }
+                }
+                else
+                {
+                    File.Move(tempPath, fullTargetPath);
+                }
+
+                // Serialize binds lazy entries to its temporary output only after the write succeeds.
+                // Rebind to the final path after replacement, releasing cached source-backed arrays.
+                archive.RebindEntriesToSource(fullTargetPath);
+            }
+            catch
+            {
+                // If serialization succeeded but replacing the destination failed, keep the temp
+                // file: entry objects may already be rebound to it and remain usable in this session.
+                if (!serialized && File.Exists(tempPath))
+                {
+                    try { File.Delete(tempPath); } catch { }
+                }
+                throw;
+            }
+        }
+
+        private static void ReplaceRcfFileWithBackup(string tempPath, string targetPath)
+        {
+            string backupPath = targetPath + "." + Guid.NewGuid().ToString("N") + ".bak";
+            File.Move(targetPath, backupPath);
+            try
+            {
+                File.Move(tempPath, targetPath);
+                try { File.Delete(backupPath); } catch { }
+            }
+            catch
+            {
+                if (!File.Exists(targetPath) && File.Exists(backupPath)) File.Move(backupPath, targetPath);
+                throw;
+            }
+        }
+
         private void OnSaveFile(bool saveAs)
         {
-            if (this._file == null) return;
+            if (this._file == null && this._rcfFile == null) return;
             string targetPath = this._currentFilePath;
+
+            if (this._rcfFile != null)
+            {
+                if (saveAs || string.IsNullOrEmpty(targetPath))
+                {
+                    using (SaveFileDialog rcfDialog = new SaveFileDialog
+                    {
+                        Title = UiLocalization.TranslateId("dialog.file.save.rcf.title", "Сохранить архив RCF", this._uiLanguage),
+                        Filter = UiLocalization.TranslateId("filter.saveRcf", "Архивы RCF (*.rcf)|*.rcf|Все файлы (*.*)|*.*", this._uiLanguage),
+                        FileName = string.IsNullOrWhiteSpace(targetPath) ? "Untitled.rcf" : Path.GetFileName(targetPath)
+                    })
+                    {
+                        if (rcfDialog.ShowDialog(this) != DialogResult.OK) return;
+                        targetPath = rcfDialog.FileName;
+                    }
+                }
+
+                try
+                {
+                    this.SyncActiveRcfEntry();
+                    SaveRcfArchiveAtomically(this._rcfFile, targetPath);
+                    this._currentFilePath = targetPath;
+                    this._rcfHasUnsavedChanges = false;
+                    this.SaveRcfTextureIndexCache();
+                    this.AddRecentFile(targetPath);
+                    if (!this._rcfAnimationItemsScanComplete)
+                        this.StartRcfAnimationCatalogScanWithProgress();
+                    this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(targetPath) + " [RCF]";
+                    WriteApplicationLog("SAVE_RCF", "Сохранён RCF: " + targetPath + "; entries=" + (this._rcfFile.Entries == null ? 0 : this._rcfFile.Entries.Count));
+                    this.ShowLocalizedMessageBoxById(this, "message.save.rcf.success", "RCF архив успешно сохранён.",
+                        "caption.save", "Сохранение", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    WriteApplicationLog("SAVE_RCF_ERROR", "Ошибка сохранения RCF: " + targetPath, ex);
+                    this.ShowLocalizedMessageBoxById(this, "message.save.rcf.failed", "Ошибка сохранения RCF: {0}",
+                        "caption.error", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+                }
+                return;
+            }
 
             if (saveAs || string.IsNullOrEmpty(targetPath))
             {
-                using (SaveFileDialog sfd = new SaveFileDialog { Filter = "Pure3D Files (*.p3d;*.rz)|*.p3d;*.rz|All Files (*.*)|*.*" })
+                using (SaveFileDialog sfd = new SaveFileDialog
+                {
+                    Title = UiLocalization.TranslateId("dialog.file.save.p3d.title", "Сохранить файл Pure3D", this._uiLanguage),
+                    Filter = UiLocalization.TranslateId("filter.saveP3d", "Pure3D без сжатия (*.p3d)|*.p3d|Pure3D с RZ-сжатием (*.p3d.rz)|*.p3d.rz|RZ (*.rz)|*.rz|Все файлы (*.*)|*.*", this._uiLanguage),
+                    FileName = string.IsNullOrWhiteSpace(targetPath) ? this._suggestedNewP3DSaveName : Path.GetFileName(targetPath),
+                    AddExtension = false,
+                    FilterIndex = (string.IsNullOrEmpty(targetPath) ? this._suggestedNewP3DSaveName : targetPath).EndsWith(".p3d.rz", StringComparison.OrdinalIgnoreCase) ? 2 :
+                        ((string.IsNullOrEmpty(targetPath) ? this._suggestedNewP3DSaveName : targetPath).EndsWith(".rz", StringComparison.OrdinalIgnoreCase) ? 3 : 1)
+                })
                 {
                     if (sfd.ShowDialog(this) != DialogResult.OK) return;
-                    targetPath = sfd.FileName;
+                    targetPath = EnsureP3DSaveExtension(sfd.FileName, sfd.FilterIndex);
                 }
             }
 
@@ -714,12 +7118,18 @@ namespace PrototypeUltimateTool
                 }
 
                 this._currentFilePath = targetPath;
+                this._fileHasUnsavedChanges = false;
+                this.AddRecentFile(targetPath);
                 this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(targetPath);
-                MessageBox.Show("Файл успешно сохранен!", "Сохранение", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                WriteApplicationLog("SAVE_P3D", "Сохранён Pure3D: " + targetPath + "; compressed=" + Utils.IsRZFile(targetPath) + "; rootChunks=" + (this._file.Nodes == null ? 0 : this._file.Nodes.Count));
+                this.ShowLocalizedMessageBoxById(this, "message.save.p3d.success", "Файл успешно сохранен!",
+                    "caption.save", "Сохранение", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка сохранения: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                WriteApplicationLog("SAVE_P3D_ERROR", "Ошибка сохранения Pure3D: " + targetPath, ex);
+                this.ShowLocalizedMessageBoxById(this, "message.save.p3d.failed", "Ошибка сохранения: {0}",
+                    "caption.error", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
             }
         }
 
@@ -728,7 +7138,7 @@ namespace PrototypeUltimateTool
         {
             if (this._file == null || this._file.Nodes == null) return;
 
-            using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog { Title = "Выберите папку для экспорта текстур" })
+            using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog { Title = UiLocalization.TranslateId("dialog.export.textures.folderTitle", "Выберите папку для экспорта текстур", this._uiLanguage) })
             {
                 if (mfbd.ShowDialog(this) != DialogResult.OK) return;
 
@@ -763,78 +7173,1161 @@ namespace PrototypeUltimateTool
                     catch { }
                 }
 
-                MessageBox.Show($"Экспорт завершен!\nУспешно сохранено текстур: {count}", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                this.ShowLocalizedMessageBoxById(this, "message.export.textures.summary",
+                    "Экспорт завершён!\nУспешно сохранено текстур: {0}", "caption.export", "Экспорт",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information, count);
             }
         }
 
-        // 2. Экспорт выделенного узла (включая экспорт моделей в .OBJ для Blender!)
+        // 2. Экспорт выбранного элемента или всей группы выделения.
+        // Для одного элемента сохраняется прежний диалог выбора формата/имени.
+        // Для нескольких элементов каждый ресурс автоматически экспортируется в отдельный файл.
         private void OnExportSelected()
         {
-            var node = this.nodeTreeView.SelectedNode != null ? this.nodeTreeView.SelectedNode.Tag as BaseNode : null;
-            if (node == null)
+            List<TreeNode> selectedTreeNodes = this.GetSelectedTreeNodesForExport();
+            if (selectedTreeNodes.Count == 0)
             {
-                MessageBox.Show("Сначала выделите элемент в дереве слева.", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                this.ShowLocalizedMessageBoxById(this, "message.export.selectionRequired",
+                    "Сначала выделите один или несколько файлов/элементов в дереве слева.", "caption.export", "Экспорт",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            string nodeStr = node.ToString() ?? "asset";
-            string name = GetCleanName(node);
-
-            // Если выделена 3D модель (PolySkin / CompositeDrawable / PrimitiveGroup) -> Экспорт в .OBJ для Blender!
-            bool isMesh = (node is PolySkin || node is CompositeDrawable || node is PrimitiveGroup);
-            if (isMesh)
+            if (selectedTreeNodes.Count > 1)
             {
-                using (SaveFileDialog sfd = new SaveFileDialog
-                {
-                    FileName = name + ".obj",
-                    Filter = "Wavefront 3D (.obj для Blender)|*.obj|Pure3D (.p3d)|*.p3d|Все файлы (*.*)|*.*"
-                })
-                {
-                    if (sfd.ShowDialog(this) != DialogResult.OK) return;
-
-                    if (sfd.FileName.EndsWith(".obj", StringComparison.OrdinalIgnoreCase))
-                    {
-                        bool ok = ExportNodeToObj(node, this._file, sfd.FileName);
-                        if (ok) MessageBox.Show("3D-модель успешно экспортирована в .OBJ!\nТеперь её можно открыть в Blender.", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        else MessageBox.Show("Не удалось извлечь полигоны этой модели.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        return;
-                    }
-                }
+                this.ExportSelectedNodesBatch(selectedTreeNodes);
+                return;
             }
 
-            // Если выделена текстура
-            if (node.Exportable)
+            TreeNode treeNode = selectedTreeNodes[0];
+            var archiveItem = treeNode.Tag as RcfArchiveItem;
+            if (archiveItem != null)
             {
-                using (SaveFileDialog sfd = new SaveFileDialog
+                using (SaveFileDialog archiveSave = new SaveFileDialog
                 {
-                    FileName = GetSafeFileName(node),
-                    Filter = "DDS Textures (*.dds)|*.dds|Все файлы (*.*)|*.*"
+                    Title = UiLocalization.TranslateId("dialog.export.archiveEntry.title", "Экспорт записи RCF", this._uiLanguage),
+                    FileName = GetRcfEntryOutputFileName(archiveItem),
+                    Filter = UiLocalization.TranslateId("filter.allFiles", "Все файлы (*.*)|*.*", this._uiLanguage)
                 })
                 {
-                    if (sfd.ShowDialog(this) != DialogResult.OK) return;
-                    using (FileStream fs = File.Create(sfd.FileName)) node.Export(fs);
-                    MessageBox.Show("Текстура успешно сохранена!", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (archiveSave.ShowDialog(this) != DialogResult.OK) return;
+                    if (archiveItem.Entry == null || !archiveItem.Entry.HasData)
+                    {
+                        this.ShowLocalizedMessageBoxById(this, "message.export.rcf.noData", "У записи нет доступных данных.",
+                            "caption.export", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    using (FileStream output = File.Create(archiveSave.FileName)) archiveItem.Entry.CopyDataTo(output);
                     return;
                 }
             }
 
-            // Резервный экспорт ноды в отдельный P3D
-            using (SaveFileDialog sfd = new SaveFileDialog { FileName = name + ".p3d", Filter = "Pure3D Node (*.p3d)|*.p3d" })
+            RcfTextureSearchHit selectedHit = treeNode.Tag as RcfTextureSearchHit;
+            RcfArchiveItem containingArchiveItem = selectedHit != null
+                ? selectedHit.Item
+                : this.FindRcfEntryAncestor(treeNode);
+            Pure3DFile sourceP3D = this._file;
+            if (containingArchiveItem != null)
+            {
+                if (!this.EnsureRcfEntryParsed(containingArchiveItem) || containingArchiveItem.ParsedFile == null)
+                {
+                    this.ShowLocalizedMessageBoxById(this, "message.export.rcf.parseFailed",
+                        "Не удалось разобрать P3D, содержащий выбранный элемент.", "caption.export", "Экспорт",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                sourceP3D = containingArchiveItem.ParsedFile;
+            }
+
+            var node = treeNode.Tag as BaseNode;
+            if (node == null && selectedHit != null && sourceP3D != null)
+                node = ResolveRcfTextureHit(sourceP3D, selectedHit.PathIndices);
+            if (node == null)
+            {
+                this.ShowLocalizedMessageBoxById(this, "message.export.p3d.dataMissing",
+                    "Не удалось получить данные выбранного элемента P3D.", "caption.export", "Экспорт",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string name = GetCleanName(node);
+            if (IsMeshNodeForExport(node))
+            {
+                using (SaveFileDialog sfd = new SaveFileDialog
+                {
+                    FileName = SanitizeExportFileName(name) + ".obj",
+                    DefaultExt = "obj",
+                    AddExtension = true,
+                    FilterIndex = 1,
+                    Title = UiLocalization.TranslateId("dialog.export.mesh.title", "Экспорт 3D-модели", this._uiLanguage),
+                    Filter = this.FormatLocalizedText("filter.exportMesh", "Wavefront 3D (.obj для Blender)|*.obj|Сырой чанк {0}|*{0}|Все файлы (*.*)|*.*", GetRawP3DChunkExtension(node))
+                })
+                {
+                    if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+                    bool chooseRawChunk = sfd.FilterIndex == 2 || sfd.FileName.EndsWith(GetRawP3DChunkExtension(node), StringComparison.OrdinalIgnoreCase);
+                    string outputPath = sfd.FileName;
+                    string expectedExtension = chooseRawChunk ? GetRawP3DChunkExtension(node) : ".obj";
+                    if (!outputPath.EndsWith(expectedExtension, StringComparison.OrdinalIgnoreCase))
+                        outputPath = Path.ChangeExtension(outputPath, expectedExtension);
+
+                    if (chooseRawChunk)
+                    {
+                        ExportNodeAsP3D(node, outputPath, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+                        this.ShowLocalizedMessageBoxById(this, "message.export.rawChunk.fileSuccess",
+                            "Сырой P3D-чанк экспортирован в файл {0}", "caption.export", "Экспорт",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information, Path.GetFileName(outputPath));
+                        return;
+                    }
+
+                    bool ok = ExportNodeToObj(node, sourceP3D, outputPath);
+                    if (ok)
+                        this.ShowLocalizedMessageBoxById(this, "message.export.mesh.success",
+                            "3D-модель успешно экспортирована в .OBJ!\nТеперь её можно открыть в Blender.",
+                            "caption.export", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    else
+                        this.ShowLocalizedMessageBoxById(this, "message.export.mesh.noPolygons",
+                            "Не удалось извлечь полигоны этой модели.", "caption.error", "Ошибка",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+            }
+
+            if (node is RecognizedRawChunk)
+            {
+                this.ExportRawP3DChunk(node, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+                return;
+            }
+
+            if (node.Exportable)
+            {
+                string resourceExtension = node.ExportExtension ?? "bin";
+                if (!resourceExtension.StartsWith(".")) resourceExtension = "." + resourceExtension;
+                string rawExtension = GetRawP3DChunkExtension(node);
+                using (SaveFileDialog sfd = new SaveFileDialog
+                {
+                    FileName = GetSafeFileName(node),
+                    Title = UiLocalization.TranslateId("dialog.export.resource.title", "Экспорт ресурса", this._uiLanguage),
+                    Filter = this.FormatLocalizedText("filter.exportResourceOrRawChunk", "Экспорт ресурса ({0})|*{0}|Сырой чанк ({1})|*{1}|Все файлы (*.*)|*.*", resourceExtension, rawExtension)
+                })
+                {
+                    if (sfd.ShowDialog(this) != DialogResult.OK) return;
+                    if (sfd.FilterIndex == 2 || sfd.FileName.EndsWith(rawExtension, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string rawPath = sfd.FileName.EndsWith(rawExtension, StringComparison.OrdinalIgnoreCase) ? sfd.FileName : Path.ChangeExtension(sfd.FileName, rawExtension);
+                        ExportNodeAsP3D(node, rawPath, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+                    }
+                    else using (FileStream fs = File.Create(sfd.FileName)) node.Export(fs);
+                    this.ShowLocalizedMessageBoxById(this, "message.export.resource.success", "Элемент успешно экспортирован!",
+                        "caption.export", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+            }
+
+            string nodeRawExtension = GetRawP3DChunkExtension(node);
+            using (SaveFileDialog sfd = new SaveFileDialog
+            {
+                Title = UiLocalization.TranslateId("dialog.export.rawChunk.title", "Экспорт сырого P3D-чанка", this._uiLanguage),
+                FileName = SanitizeExportFileName(name) + nodeRawExtension,
+                Filter = this.FormatLocalizedText("filter.exportRawChunk", "Сырой P3D-чанк ({0})|*{0}|Все файлы (*.*)|*.*", nodeRawExtension)
+            })
             {
                 if (sfd.ShowDialog(this) != DialogResult.OK) return;
-                var singleP3d = new Pure3DFile();
-                singleP3d.Nodes.Add(node);
-                using (FileStream fs = File.Create(sfd.FileName)) singleP3d.Serialize(fs, Endian.Little);
-                MessageBox.Show("Узел сохранен как P3D!", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                string rawPath = sfd.FileName.EndsWith(nodeRawExtension, StringComparison.OrdinalIgnoreCase) ? sfd.FileName : Path.ChangeExtension(sfd.FileName, nodeRawExtension);
+                ExportNodeAsP3D(node, rawPath, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+                this.ShowLocalizedMessageBoxById(this, "message.export.rawChunk.success", "Сырой P3D-чанк экспортирован!",
+                    "caption.export", "Экспорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
 
-        // 3. Полная распаковка P3D целиком по папкам (Dump)
-        private void OnDumpWholeP3D()
+        private List<TreeNode> GetSelectedTreeNodesForExport()
         {
-            if (this._file == null || this._file.Nodes == null) return;
+            if (this.nodeTreeView == null) return new List<TreeNode>();
+            return this.nodeTreeView.SelectedNodes
+                .Where(node => node != null && node.Tag != null && !(node.Tag is RcfFolderItem))
+                .Distinct()
+                .ToList();
+        }
 
-            using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog { Title = "Куда распаковать всё содержимое P3D?" })
+        private void ExportSelectedNodesBatch(IList<TreeNode> selectedTreeNodes)
+        {
+            using (ModernFolderBrowserDialog folderDialog = new ModernFolderBrowserDialog
+            {
+                Title = this.FormatLocalizedText("dialog.export.selectedBatch.folderTitle", "Выберите папку для экспорта {0} элементов", selectedTreeNodes.Count)
+            })
+            {
+                if (folderDialog.ShowDialog(this) != DialogResult.OK) return;
+                string outputDirectory = folderDialog.SelectedPath;
+                HashSet<string> usedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                List<string> failures = new List<string>();
+                int exportedCount = 0;
+
+                foreach (TreeNode treeNode in selectedTreeNodes)
+                {
+                    string description = treeNode.Text ?? "элемент";
+                    string outputPath = null;
+                    try
+                    {
+                        RcfArchiveItem archiveItem = treeNode.Tag as RcfArchiveItem;
+                        if (archiveItem != null)
+                        {
+                            if (archiveItem.Entry == null || !archiveItem.Entry.HasData)
+                                throw new InvalidOperationException("у записи нет доступных данных");
+
+                            outputPath = GetUniqueExportPath(outputDirectory, GetRcfEntryOutputFileName(archiveItem), usedPaths);
+                            using (FileStream output = File.Create(outputPath)) archiveItem.Entry.CopyDataTo(output);
+                            exportedCount++;
+                            continue;
+                        }
+
+                        RcfTextureSearchHit textureHit = treeNode.Tag as RcfTextureSearchHit;
+                        RcfArchiveItem containingArchiveItem = textureHit != null
+                            ? textureHit.Item
+                            : this.FindRcfEntryAncestor(treeNode);
+                        Pure3DFile sourceP3D = this._file;
+                        if (containingArchiveItem != null)
+                        {
+                            if (!this.EnsureRcfEntryParsed(containingArchiveItem) || containingArchiveItem.ParsedFile == null)
+                                throw new InvalidOperationException("не удалось разобрать содержащий P3D");
+                            sourceP3D = containingArchiveItem.ParsedFile;
+                        }
+
+                        BaseNode node = treeNode.Tag as BaseNode;
+                        if (node == null && textureHit != null && sourceP3D != null)
+                            node = ResolveRcfTextureHit(sourceP3D, textureHit.PathIndices);
+                        if (node == null)
+                            throw new InvalidOperationException("не удалось определить тип ресурса");
+
+                        description = node.ToString() ?? description;
+                        if (IsMeshNodeForExport(node))
+                        {
+                            string meshName = SanitizeExportFileName(GetCleanName(node)) + ".obj";
+                            outputPath = GetUniqueExportPath(outputDirectory, meshName, usedPaths);
+                            if (ExportNodeToObj(node, sourceP3D, outputPath))
+                            {
+                                exportedCount++;
+                                continue;
+                            }
+
+                            // If OBJ geometry extraction is not supported for this particular
+                            // node, preserve the selected data as a standalone P3D instead.
+                            try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
+                            outputPath = GetUniqueExportPath(outputDirectory,
+                                SanitizeExportFileName(GetCleanName(node)) + GetRawP3DChunkExtension(node), usedPaths);
+                            ExportNodeAsP3D(node, outputPath, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+                            exportedCount++;
+                            continue;
+                        }
+
+                        if (node is RecognizedRawChunk)
+                        {
+                            outputPath = GetUniqueExportPath(outputDirectory,
+                                SanitizeExportFileName(GetCleanName(node)) + GetRawP3DChunkExtension(node), usedPaths);
+                            ExportNodeAsP3D(node, outputPath, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+                            exportedCount++;
+                            continue;
+                        }
+
+                        if (node.Exportable)
+                        {
+                            outputPath = GetUniqueExportPath(outputDirectory,
+                                SanitizeExportFileName(GetSafeFileName(node)), usedPaths);
+                            using (FileStream stream = File.Create(outputPath)) node.Export(stream);
+                            exportedCount++;
+                            continue;
+                        }
+
+                        outputPath = GetUniqueExportPath(outputDirectory,
+                            SanitizeExportFileName(GetCleanName(node)) + GetRawP3DChunkExtension(node), usedPaths);
+                        ExportNodeAsP3D(node, outputPath, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+                        exportedCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        string issue = description + (string.IsNullOrEmpty(outputPath) ? string.Empty : " → " + Path.GetFileName(outputPath));
+                        failures.Add(issue + ": " + ex.Message);
+                        try { if (!string.IsNullOrEmpty(outputPath) && File.Exists(outputPath) && new FileInfo(outputPath).Length == 0) File.Delete(outputPath); } catch { }
+                    }
+                }
+
+                string summary = this.FormatLocalizedText("message.export.selection.summary",
+                    "Экспорт выделения завершён.\nУспешно сохранено: {0} из {1}.", exportedCount, selectedTreeNodes.Count);
+                if (failures.Count > 0)
+                {
+                    string failureDetails = string.Join("\n", failures.Take(8).ToArray());
+                    if (failures.Count > 8)
+                        failureDetails += this.FormatLocalizedText("message.common.andMore", "\n… и ещё {0}.", failures.Count - 8);
+                    summary += this.FormatLocalizedText("message.export.selection.errors", "\nОшибок: {0}.\n\n{1}", failures.Count, failureDetails);
+                }
+                this.ShowLocalizedMessageBoxText(this, summary, "caption.export.selection", "Экспорт выделения",
+                    MessageBoxButtons.OK, failures.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            }
+        }
+
+        private static bool IsMeshNodeForExport(BaseNode node)
+        {
+            return node is PolySkin || node is Geometry || node is CompositeDrawable ||
+                node is PrimitiveGroup || node is CompositeDrawablePolySkinReference;
+        }
+
+        // Writes the selected section as a self-contained raw Pure3D chunk: type ID, header size,
+        // total size, payload and recursively serialized children. No outer Pure3D file header is added.
+        private static void ExportNodeAsP3D(BaseNode node, string filePath, Endian endian)
+        {
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            try
+            {
+                using (FileStream stream = File.Create(filePath))
+                    SerializeRawP3DChunk(stream, node, endian);
+                long length = new FileInfo(filePath).Length;
+                WriteApplicationLog("RAW_CHUNK_EXPORT_OK", "Экспортирован сырой чанк: " + filePath + "; type=0x" + node.TypeId.ToString("X8") + "; node=" + node.GetType().Name + "; endian=" + endian + "; bytes=" + length);
+            }
+            catch (Exception ex)
+            {
+                WriteApplicationLog("RAW_CHUNK_EXPORT_ERROR", "Ошибка экспорта сырого чанка: " + filePath + "; type=0x" + node.TypeId.ToString("X8"), ex);
+                throw;
+            }
+        }
+
+        private static void SerializeRawP3DChunk(Stream output, BaseNode node, Endian endian)
+        {
+            if (output == null) throw new ArgumentNullException(nameof(output));
+            if (node == null) throw new ArgumentNullException(nameof(node));
+            using (var childrenStream = new MemoryStream())
+            using (var payloadStream = new MemoryStream())
+            {
+                if (node.Children != null)
+                    foreach (BaseNode child in node.Children)
+                        SerializeRawP3DChunk(childrenStream, child, endian);
+                node.Serialize(payloadStream, endian);
+                output.WriteValueU32(node.TypeId, endian);
+                output.WriteValueU32(checked((uint)(12L + payloadStream.Length)), endian);
+                output.WriteValueU32(checked((uint)(12L + payloadStream.Length + childrenStream.Length)), endian);
+                payloadStream.Position = 0;
+                payloadStream.CopyTo(output);
+                childrenStream.Position = 0;
+                childrenStream.CopyTo(output);
+            }
+        }
+
+        private const string RawP3DChunkOrderManifestFileName = "P3DChunkOrder.manifest";
+
+        private string GetRawP3DChunkOrderGroup(Pure3DFile sourceP3D, RcfArchiveItem archiveItem)
+        {
+            string sourcePath = string.IsNullOrWhiteSpace(this._currentFilePath)
+                ? "<unsaved-p3d>"
+                : Path.GetFullPath(this._currentFilePath);
+            if (archiveItem != null)
+                return "RCF|" + sourcePath + "|" + archiveItem.Name;
+            return "P3D|" + sourcePath;
+        }
+
+        private static void AppendRawP3DChunkOrderManifest(string outputDirectory,
+            IEnumerable<Tuple<string, int, string>> additions)
+        {
+            string manifestPath = Path.Combine(outputDirectory, RawP3DChunkOrderManifestFileName);
+            var records = new Dictionary<string, Tuple<string, int>>(StringComparer.OrdinalIgnoreCase);
+
+            if (File.Exists(manifestPath))
+            {
+                foreach (string line in File.ReadAllLines(manifestPath, Encoding.UTF8))
+                {
+                    string[] fields = line.Split('\t');
+                    if (fields.Length < 3 || fields[0].StartsWith("#", StringComparison.Ordinal)) continue;
+                    int orderIndex;
+                    if (!int.TryParse(fields[1], System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out orderIndex)) continue;
+                    string groupKey;
+                    try { groupKey = Encoding.UTF8.GetString(Convert.FromBase64String(fields[0])); }
+                    catch { continue; }
+                    string fileName = fields[2];
+                    if (string.IsNullOrWhiteSpace(fileName) || Path.GetFileName(fileName) != fileName) continue;
+                    records[fileName] = Tuple.Create(groupKey, orderIndex);
+                }
+            }
+
+            foreach (Tuple<string, int, string> addition in additions ?? Enumerable.Empty<Tuple<string, int, string>>())
+            {
+                if (addition == null || string.IsNullOrWhiteSpace(addition.Item3)) continue;
+                string fileName = Path.GetFileName(addition.Item3);
+                if (string.IsNullOrWhiteSpace(fileName)) continue;
+                records[fileName] = Tuple.Create(addition.Item1 ?? string.Empty, addition.Item2);
+            }
+
+            var lines = new List<string> { "# PrototypeUltimateTool P3D root order manifest v1" };
+            foreach (KeyValuePair<string, Tuple<string, int>> record in records
+                .OrderBy(item => item.Value.Item1, StringComparer.Ordinal)
+                .ThenBy(item => item.Value.Item2)
+                .ThenBy(item => item.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                string groupToken = Convert.ToBase64String(Encoding.UTF8.GetBytes(record.Value.Item1 ?? string.Empty));
+                lines.Add(groupToken + "\t" + record.Value.Item2.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\t" + record.Key);
+            }
+
+            string tempPath = manifestPath + ".tmp-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                File.WriteAllLines(tempPath, lines, new UTF8Encoding(false));
+                if (File.Exists(manifestPath))
+                {
+                    try { File.Replace(tempPath, manifestPath, null); }
+                    catch
+                    {
+                        File.Delete(manifestPath);
+                        File.Move(tempPath, manifestPath);
+                    }
+                }
+                else File.Move(tempPath, manifestPath);
+            }
+            finally
+            {
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            }
+        }
+
+        private static string[] ApplyRawP3DChunkOrderManifest(string[] sourceFiles)
+        {
+            if (sourceFiles == null || sourceFiles.Length < 2 || sourceFiles.Any(path => !IsRawP3DChunkFile(path)))
+                return sourceFiles;
+
+            var orderByPath = new Dictionary<string, Tuple<string, int>>(StringComparer.OrdinalIgnoreCase);
+            foreach (string directory in sourceFiles.Select(path => Path.GetDirectoryName(Path.GetFullPath(path)))
+                .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                string manifestPath = Path.Combine(directory, RawP3DChunkOrderManifestFileName);
+                if (!File.Exists(manifestPath)) continue;
+                foreach (string line in File.ReadAllLines(manifestPath, Encoding.UTF8))
+                {
+                    string[] fields = line.Split('\t');
+                    if (fields.Length < 3 || fields[0].StartsWith("#", StringComparison.Ordinal)) continue;
+                    int orderIndex;
+                    if (!int.TryParse(fields[1], System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out orderIndex)) continue;
+                    string groupKey;
+                    try { groupKey = Encoding.UTF8.GetString(Convert.FromBase64String(fields[0])); }
+                    catch { continue; }
+                    string fileName = fields[2];
+                    if (string.IsNullOrWhiteSpace(fileName) || Path.GetFileName(fileName) != fileName) continue;
+                    string fullPath = Path.GetFullPath(Path.Combine(directory, fileName));
+                    orderByPath[fullPath] = Tuple.Create(groupKey, orderIndex);
+                }
+            }
+
+            string[] normalizedPaths = sourceFiles.Select(Path.GetFullPath).ToArray();
+            int mappedCount = normalizedPaths.Count(path => orderByPath.ContainsKey(path));
+            if (mappedCount != normalizedPaths.Length)
+            {
+                WriteApplicationLog("RAW_CHUNK_ORDER_MANIFEST_INCOMPLETE", "Исходный порядок не применён: не все выбранные сырые чанки присутствуют в P3DChunkOrder.manifest; selected=" +
+                    normalizedPaths.Length + "; mapped=" + mappedCount + ". Повторите экспорт чанков с текущей версией приложения.");
+                return sourceFiles;
+            }
+
+            var sorted = normalizedPaths.Select((path, originalIndex) => new
+            {
+                Path = sourceFiles[originalIndex],
+                OriginalIndex = originalIndex,
+                Order = orderByPath[path]
+            })
+            .OrderBy(item => item.Order.Item1, StringComparer.Ordinal)
+            .ThenBy(item => item.Order.Item2)
+            .ThenBy(item => item.OriginalIndex)
+            .Select(item => item.Path)
+            .ToArray();
+
+            WriteApplicationLog("RAW_CHUNK_ORDER_MANIFEST_APPLIED", "Восстановлен исходный порядок корневых секций при импорте; files=" + sorted.Length +
+                "; groups=" + orderByPath.Where(pair => normalizedPaths.Contains(pair.Key, StringComparer.OrdinalIgnoreCase))
+                    .Select(pair => pair.Value.Item1).Distinct(StringComparer.Ordinal).Count());
+            return sorted;
+        }
+
+        private static bool IsRawP3DChunkFile(string path)
+        {
+            return !string.IsNullOrWhiteSpace(path) &&
+                Path.GetFileName(path).IndexOf(".p3dchunk-", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool TryGetRawChunkExpectedTypeId(string path, out uint expectedTypeId)
+        {
+            expectedTypeId = 0;
+            if (!IsRawP3DChunkFile(path)) return false;
+            string name = Path.GetFileName(path);
+            if (name.EndsWith(".rz", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 3);
+            int marker = name.LastIndexOf('-');
+            if (marker < 0 || name.Length - marker - 1 != 8) return false;
+            return uint.TryParse(name.Substring(marker + 1), System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out expectedTypeId);
+        }
+
+        private static string TryGetRawChunkExpectedTypeSlug(string path)
+        {
+            if (!IsRawP3DChunkFile(path)) return null;
+            string name = Path.GetFileName(path);
+            int marker = name.IndexOf(".p3dchunk-", StringComparison.OrdinalIgnoreCase);
+            if (marker < 0) return null;
+            string suffix = name.Substring(marker + ".p3dchunk-".Length);
+            int extension = suffix.LastIndexOf('.');
+            if (extension >= 0) suffix = suffix.Substring(0, extension);
+            int typeIdSeparator = suffix.LastIndexOf('-');
+            if (typeIdSeparator <= 0 || suffix.Length - typeIdSeparator - 1 != 8) return null;
+            if (!uint.TryParse(suffix.Substring(typeIdSeparator + 1), System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out _)) return null;
+            return suffix.Substring(0, typeIdSeparator).ToLowerInvariant();
+        }
+
+        private static string GetRawP3DChunkTypeSlug(string typeName)
+        {
+            var slug = new StringBuilder();
+            string value = typeName ?? string.Empty;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (char.IsLetterOrDigit(c))
+                {
+                    if (char.IsUpper(c) && slug.Length > 0 && char.IsLower(value[i - 1])) slug.Append('-');
+                    slug.Append(char.ToLowerInvariant(c));
+                }
+                else if (slug.Length > 0 && slug[slug.Length - 1] != '-') slug.Append('-');
+            }
+            return slug.ToString().Trim('-');
+        }
+
+        private static bool TryReadRawChunkHeader(Stream input, Endian endian, out uint typeId, out uint headerSize, out uint totalSize)
+        {
+            typeId = headerSize = totalSize = 0;
+            if (input == null || !input.CanSeek || input.Length < 12 || input.Length > uint.MaxValue) return false;
+            long savedPosition = input.Position;
+            try
+            {
+                input.Position = 0;
+                typeId = input.ReadValueU32(endian);
+                headerSize = input.ReadValueU32(endian);
+                totalSize = input.ReadValueU32(endian);
+                return headerSize >= 12U && totalSize >= headerSize && totalSize == (uint)input.Length;
+            }
+            catch { return false; }
+            finally { input.Position = savedPosition; }
+        }
+
+        private static BaseNode DeserializeRawP3DChunk(Stream input, Endian preferredEndian, PrototypeGame game,
+            string sourcePath, out Endian detectedEndian)
+        {
+            if (input == null || !input.CanSeek)
+                throw new InvalidDataException("Поток сырого чанка должен поддерживать перемещение по данным.");
+            if (input.Length < 12)
+                throw new InvalidDataException("Файл короче минимального заголовка P3D-секции.");
+            const long maxRawChunkFileBytes = 256L * 1024L * 1024L;
+            if (input.Length > maxRawChunkFileBytes)
+                throw new InvalidDataException("Размер одной сырой P3D-секции превышает безопасный лимит 256 МБ. Файл отклонён до выделения памяти.");
+
+            uint littleType, littleHeader, littleTotal;
+            uint bigType, bigHeader, bigTotal;
+            bool littleValid = TryReadRawChunkHeader(input, Endian.Little, out littleType, out littleHeader, out littleTotal);
+            bool bigValid = TryReadRawChunkHeader(input, Endian.Big, out bigType, out bigHeader, out bigTotal);
+            if (!littleValid && !bigValid)
+                throw new InvalidDataException("Некорректный заголовок сырого чанка: размеры не соответствуют длине файла.");
+
+            uint expectedType;
+            bool hasExpectedType = TryGetRawChunkExpectedTypeId(sourcePath, out expectedType);
+            bool littleMatch = littleValid && (!hasExpectedType || littleType == expectedType);
+            bool bigMatch = bigValid && (!hasExpectedType || bigType == expectedType);
+            if (hasExpectedType && !littleMatch && !bigMatch)
+                throw new InvalidDataException("Type ID заголовка не совпадает с расширением файла. В имени ожидается 0x" +
+                    expectedType.ToString("X8") + ", найдено little=0x" + littleType.ToString("X8") +
+                    ", big=0x" + bigType.ToString("X8") + ".");
+
+            if (littleMatch && bigMatch) detectedEndian = preferredEndian;
+            else if (littleMatch) detectedEndian = Endian.Little;
+            else if (bigMatch) detectedEndian = Endian.Big;
+            else if (littleValid && bigValid) detectedEndian = preferredEndian;
+            else detectedEndian = littleValid ? Endian.Little : Endian.Big;
+
+            input.Position = 0;
+            int parsedNodeCount = 0;
+            string preferredRootTypeSlug = TryGetRawChunkExpectedTypeSlug(sourcePath);
+            BaseNode node = DeserializeRawChunkTolerant(input, detectedEndian, game, null,
+                input.Length, preferredRootTypeSlug, 0, ref parsedNodeCount);
+            if (input.Position != input.Length)
+                throw new InvalidDataException("После сырого чанка обнаружены лишние данные: прочитано " +
+                    input.Position + " из " + input.Length + " байт.");
+
+            uint actualType = detectedEndian == Endian.Little ? littleType : bigType;
+            if (node.TypeId != actualType)
+                throw new InvalidDataException("Декодированный Type ID не соответствует заголовку.");
+
+            int unknownCount = CountUnknownNodesRecursive(node);
+            WriteApplicationLog("RAW_CHUNK_PARSE_SUMMARY", "Разобран сырой чанк: file=" + sourcePath +
+                "; root=" + node.GetType().Name + "; type=0x" + node.TypeId.ToString("X8") +
+                "; endian=" + detectedEndian + "; nodes=" + parsedNodeCount + "; unknownNodes=" + unknownCount);
+            return node;
+        }
+
+        private static BaseNode DeserializeRawChunkTolerant(Stream input, Endian endian, PrototypeGame game,
+            BaseNode parent, long parentEnd, string preferredTypeSlug, int depth, ref int parsedNodeCount)
+        {
+            const int maxDepth = 256;
+            const int maxNodes = 250000;
+            if (depth > maxDepth)
+                throw new InvalidDataException("Слишком большая вложенность P3D-секций (лимит " + maxDepth + ").");
+            parsedNodeCount++;
+            if (parsedNodeCount > maxNodes)
+                throw new InvalidDataException("Слишком много P3D-секций в одном сыром чанке (лимит " + maxNodes + ").");
+
+            long chunkStart = input.Position;
+            if (chunkStart < 0 || parentEnd > input.Length || parentEnd - chunkStart < 12)
+                throw new InvalidDataException("Вложенная секция не содержит полного 12-байтового заголовка.");
+
+            uint typeId = input.ReadValueU32(endian);
+            uint headerSize = input.ReadValueU32(endian);
+            uint totalSize = input.ReadValueU32(endian);
+            long headerEnd;
+            long chunkEnd;
+            try
+            {
+                headerEnd = checked(chunkStart + (long)headerSize);
+                chunkEnd = checked(chunkStart + (long)totalSize);
+            }
+            catch (OverflowException ex)
+            {
+                throw new InvalidDataException("Переполнение размера секции 0x" + typeId.ToString("X8") + ".", ex);
+            }
+            if (headerSize < 12U || totalSize < headerSize || headerEnd > parentEnd || chunkEnd > parentEnd ||
+                headerEnd > input.Length || chunkEnd > input.Length || headerSize - 12U > int.MaxValue)
+                throw new InvalidDataException("Некорректные размеры секции 0x" + typeId.ToString("X8") +
+                    " (header=" + headerSize + ", total=" + totalSize + ").");
+
+            long payloadStart = chunkStart + 12L;
+            int payloadLength = checked((int)(headerSize - 12U));
+            const int maxChunkPayloadBytes = 256 * 1024 * 1024;
+            if (payloadLength > maxChunkPayloadBytes)
+                throw new InvalidDataException("Payload секции 0x" + typeId.ToString("X8") + " превышает лимит 256 МБ.");
+            byte[] payload = new byte[payloadLength];
+            input.Position = payloadStart;
+            int bytesRead = 0;
+            while (bytesRead < payload.Length)
+            {
+                int read = input.Read(payload, bytesRead, payload.Length - bytesRead);
+                if (read <= 0)
+                    throw new EndOfStreamException("Не удалось прочитать payload секции 0x" + typeId.ToString("X8") + ".");
+                bytesRead += read;
+            }
+            input.Position = headerEnd;
+
+            List<BaseNode> candidates = NodeFactory.CreateNodeCandidates(typeId, game);
+            int registeredCandidateCount = candidates.Count;
+            PrototypeGame nodeGame = game;
+            if (parent == null && !string.IsNullOrWhiteSpace(preferredTypeSlug))
+            {
+                BaseNode preferred = candidates.FirstOrDefault(candidate =>
+                    string.Equals(GetRawP3DChunkTypeSlug(candidate.GetType().Name), preferredTypeSlug,
+                        StringComparison.OrdinalIgnoreCase));
+                if (preferred != null)
+                {
+                    candidates = new List<BaseNode> { preferred };
+                    KnownGameAttribute knownGame = preferred.GetType()
+                        .GetCustomAttributes(typeof(KnownGameAttribute), false)
+                        .OfType<KnownGameAttribute>().FirstOrDefault();
+                    if (knownGame != null && knownGame.Game != PrototypeGame.Any)
+                        nodeGame = knownGame.Game;
+                }
+                else
+                {
+                    WriteApplicationLog("RAW_CHUNK_ROOT_TYPE_SLUG_MISMATCH", "Класс в расширении сырого чанка не найден среди зарегистрированных типов; slug=" +
+                        preferredTypeSlug + "; typeId=0x" + typeId.ToString("X8") + "; candidates=" +
+                        string.Join(",", candidates.Select(candidate => GetRawP3DChunkTypeSlug(candidate.GetType().Name))));
+                    // Do not guess a different root class when the raw export filename specifies one.
+                    candidates.Clear();
+                }
+            }
+            else if (parent != null && game == PrototypeGame.Any && candidates.Count > 1)
+            {
+                // Without a known P1/P2 target, the same ID can map to different payload layouts.
+                // Treat the nested chunk as opaque rather than trying incompatible layouts which
+                // may interpret arbitrary bytes as allocation counts. Its children are still parsed.
+                WriteApplicationLog("RAW_CHUNK_AMBIGUOUS_CHILD_PRESERVED", "Дочерняя секция сохранена как raw payload из-за неоднозначного P1/P2 типа; typeId=0x" +
+                    typeId.ToString("X8") + "; candidates=" + string.Join(",", candidates.Select(c => c.GetType().Name)));
+                candidates.Clear();
+            }
+
+            BaseNode node = null;
+            Exception parseError = null;
+            foreach (BaseNode candidate in candidates)
+            {
+                try
+                {
+                    // This deserializer receives a MemoryStream containing ONLY the payload.
+                    // Some legacy readers calculate remaining payload bytes using StartPosition +
+                    // HeaderSize/TotalSize - input.Position. Assign payload-relative metadata while
+                    // parsing, otherwise they attempt to read an extra 12-byte chunk header and
+                    // throw EndOfStreamException. Restore source chunk metadata afterwards.
+                    candidate.Game = nodeGame;
+                    candidate.StartPosition = 0;
+                    candidate.HeaderSize = (uint)payload.Length;
+                    candidate.TotalSize = (uint)payload.Length;
+                    candidate.ParentNode = parent;
+                    candidate.ID = typeId;
+                    using (MemoryStream payloadStream = new MemoryStream(payload, false))
+                    {
+                        candidate.Deserialize(payloadStream, endian);
+                        if (payloadStream.Position != payloadStream.Length)
+                            throw new FormatException("Десериализатор " + candidate.GetType().Name + " прочитал " +
+                                payloadStream.Position + " байт вместо " + payloadStream.Length + ".");
+                    }
+                    candidate.StartPosition = checked((uint)chunkStart);
+                    candidate.HeaderSize = headerSize;
+                    candidate.TotalSize = totalSize;
+                    node = candidate;
+                    break;
+                }
+                catch (Exception ex) when (IsRecoverableRawChunkParseError(ex))
+                {
+                    parseError = ex;
+                }
+            }
+
+            if (node == null)
+            {
+                node = new Unknown(typeId)
+                {
+                    Game = nodeGame,
+                    StartPosition = checked((uint)chunkStart),
+                    HeaderSize = headerSize,
+                    TotalSize = totalSize,
+                    ParentNode = parent,
+                    ID = typeId,
+                    Data = payload,
+                    HasError = registeredCandidateCount > 0,
+                    DeserializationError = parseError == null ? null : parseError.Message
+                };
+                if (registeredCandidateCount > 0)
+                {
+                    WriteApplicationLog("RAW_CHUNK_TYPED_PARSE_FALLBACK", "Секция сохранена без типизированного разбора: type=0x" +
+                        typeId.ToString("X8") + "; candidates=" + registeredCandidateCount + "; depth=" + depth +
+                        "; reason=" + (parseError == null ? "no matching parser" : parseError.GetType().Name + ": " + parseError.Message));
+                }
+            }
+
+            input.Position = headerEnd;
+            while (input.Position < chunkEnd)
+            {
+                long previousPosition = input.Position;
+                BaseNode child = DeserializeRawChunkTolerant(input, endian, nodeGame, node, chunkEnd,
+                    null, depth + 1, ref parsedNodeCount);
+                if (input.Position <= previousPosition)
+                    throw new InvalidDataException("Парсер не продвинул позицию после дочерней секции 0x" + typeId.ToString("X8") + ".");
+                node.Children.Add(child);
+            }
+            if (input.Position != chunkEnd)
+                throw new InvalidDataException("Вложенные секции не заканчиваются на границе секции 0x" + typeId.ToString("X8") + ".");
+            return node;
+        }
+
+        private static bool IsRecoverableRawChunkParseError(Exception ex)
+        {
+            return ex is IOException || ex is InvalidDataException || ex is FormatException || ex is OverflowException ||
+                ex is ArgumentException || ex is IndexOutOfRangeException || ex is NotSupportedException ||
+                ex is NullReferenceException || ex is InvalidOperationException;
+        }
+
+        private static int CountUnknownNodesRecursive(BaseNode node)
+        {
+            if (node == null) return 0;
+            int count = node is Unknown ? 1 : 0;
+            if (node.Children != null)
+                foreach (BaseNode child in node.Children) count += CountUnknownNodesRecursive(child);
+            return count;
+        }
+
+        private static string GetRawP3DChunkExtension(BaseNode node)
+        {
+            string typeName = node == null ? "unknown" : node.GetType().Name;
+            var slug = new StringBuilder();
+            for (int i = 0; i < typeName.Length; i++)
+            {
+                char c = typeName[i];
+                if (char.IsLetterOrDigit(c))
+                {
+                    if (char.IsUpper(c) && slug.Length > 0 && char.IsLower(typeName[i - 1])) slug.Append('-');
+                    slug.Append(char.ToLowerInvariant(c));
+                }
+                else if (slug.Length > 0 && slug[slug.Length - 1] != '-') slug.Append('-');
+            }
+            string safeSlug = slug.ToString().Trim('-');
+            if (string.IsNullOrEmpty(safeSlug)) safeSlug = "unknown";
+            uint typeId = node == null ? 0U : node.TypeId;
+            return ".p3dchunk-" + safeSlug + "-" + typeId.ToString("x8");
+        }
+
+        private bool CanResolveSelectedP3DNode(TreeNode selectedTreeNode)
+        {
+            BaseNode node;
+            Pure3DFile p3d;
+            RcfArchiveItem archiveItem;
+            string error;
+            return this.TryResolveTreeP3DNode(selectedTreeNode, out node, out p3d, out archiveItem, out error);
+        }
+
+        private bool TryResolveTreeP3DNode(TreeNode selectedTreeNode, out BaseNode node, out Pure3DFile sourceP3D,
+            out RcfArchiveItem archiveItem, out string error)
+        {
+            node = null;
+            sourceP3D = null;
+            archiveItem = null;
+            error = null;
+            if (selectedTreeNode == null) { error = "Выберите P3D-секцию в дереве."; return false; }
+
+            var hit = selectedTreeNode.Tag as RcfTextureSearchHit;
+            archiveItem = hit != null ? hit.Item : this.FindRcfEntryAncestor(selectedTreeNode);
+            sourceP3D = archiveItem != null ? null : this._file;
+            if (archiveItem != null)
+            {
+                if (!this.EnsureRcfEntryParsed(archiveItem) || archiveItem.ParsedFile == null)
+                { error = UiLocalization.TranslateId("message.rawChunk.containerParseFailed", "Не удалось разобрать P3D внутри RCF.", this._uiLanguage); return false; }
+                sourceP3D = archiveItem.ParsedFile;
+            }
+
+            node = selectedTreeNode.Tag as BaseNode;
+            if (node == null && hit != null && sourceP3D != null)
+                node = ResolveRcfTextureHit(sourceP3D, hit.PathIndices);
+            if (node == null || sourceP3D == null)
+            { error = UiLocalization.TranslateId("message.rawChunk.invalidSection", "Выбранный элемент не является внутренней P3D-секцией.", this._uiLanguage); return false; }
+            return true;
+        }
+
+        private void OnExportRawP3DChunk()
+        {
+            List<TreeNode> selected = this.GetSelectedTreeNodesForExport();
+            if (selected.Count == 0) return;
+            if (selected.Count > 1)
+            {
+                this.ExportSelectedRawP3DChunksBatch(selected);
+                return;
+            }
+            BaseNode node; Pure3DFile sourceP3D; RcfArchiveItem archiveItem; string error;
+            if (!this.TryResolveTreeP3DNode(selected[0], out node, out sourceP3D, out archiveItem, out error))
+            {
+                this.ShowLocalizedMessageBoxText(this, error, "caption.export.rawChunk", "Экспорт сырого чанка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                WriteApplicationLog("RAW_CHUNK_EXPORT_ERROR", "Не удалось разрешить выбранный элемент для экспорта сырого чанка: " + selected[0].Text + "; " + error);
+                return;
+            }
+            ExportRawP3DChunk(node, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+        }
+
+        private void ExportSelectedRawP3DChunksBatch(IList<TreeNode> selectedNodes)
+        {
+            using (ModernFolderBrowserDialog folderDialog = new ModernFolderBrowserDialog
+            {
+                Title = this.FormatLocalizedText("dialog.export.rawBatch.folderTitle", "Выберите папку для экспорта {0} сырых P3D-чанков", selectedNodes.Count)
+            })
+            {
+                if (folderDialog.ShowDialog(this) != DialogResult.OK) return;
+                string outputDirectory = folderDialog.SelectedPath;
+                var usedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var errors = new List<string>();
+                var orderManifestEntries = new List<Tuple<string, int, string>>();
+                int exported = 0;
+                WriteApplicationLog("RAW_CHUNK_BATCH_EXPORT_BEGIN", "Начат пакетный экспорт сырых P3D-чанков; selected=" + selectedNodes.Count + "; folder=" + outputDirectory);
+
+                foreach (TreeNode treeNode in selectedNodes)
+                {
+                    BaseNode node; Pure3DFile sourceP3D; RcfArchiveItem archiveItem; string resolveError;
+                    string outputPath = null;
+                    try
+                    {
+                        if (!this.TryResolveTreeP3DNode(treeNode, out node, out sourceP3D, out archiveItem, out resolveError))
+                            throw new InvalidDataException(resolveError ?? "Не удалось разрешить P3D-секцию.");
+                        string fileName = SanitizeExportFileName(GetCleanName(node)) + GetRawP3DChunkExtension(node);
+                        outputPath = GetUniqueExportPath(outputDirectory, fileName, usedPaths);
+                        ExportNodeAsP3D(node, outputPath, sourceP3D != null ? sourceP3D.Endian : Endian.Little);
+                        exported++;
+
+                        // Store the original root index outside the chunk payload. This keeps game
+                        // chunk bytes and original resource names unchanged while allowing a later
+                        // multi-file import to restore the order from the source P3D.
+                        int rootIndex = sourceP3D != null && node.ParentNode == null
+                            ? sourceP3D.Nodes.IndexOf(node) : -1;
+                        if (rootIndex >= 0)
+                        {
+                            string orderGroup = this.GetRawP3DChunkOrderGroup(sourceP3D, archiveItem);
+                            orderManifestEntries.Add(Tuple.Create(orderGroup, rootIndex, Path.GetFileName(outputPath)));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        string description = (treeNode == null ? "<null>" : treeNode.Text) +
+                            (string.IsNullOrEmpty(outputPath) ? string.Empty : " → " + Path.GetFileName(outputPath));
+                        errors.Add(description + ": " + ex.Message);
+                        WriteApplicationLog("RAW_CHUNK_BATCH_EXPORT_ERROR", "Не удалось экспортировать выделенную секцию: " + description, ex);
+                    }
+                }
+
+                if (orderManifestEntries.Count > 0)
+                {
+                    try
+                    {
+                        AppendRawP3DChunkOrderManifest(outputDirectory, orderManifestEntries);
+                        WriteApplicationLog("RAW_CHUNK_ORDER_MANIFEST_WRITTEN", "Сохранён sidecar-манифест исходного порядка корневых секций; entries=" +
+                            orderManifestEntries.Count + "; path=" + Path.Combine(outputDirectory, RawP3DChunkOrderManifestFileName));
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add("Не удалось сохранить манифест порядка секций: " + ex.Message);
+                        WriteApplicationLog("RAW_CHUNK_ORDER_MANIFEST_WRITE_ERROR", "Не удалось сохранить манифест исходного порядка секций.", ex);
+                    }
+                }
+
+                WriteApplicationLog("RAW_CHUNK_BATCH_EXPORT_END", "Пакетный экспорт сырых P3D-чанков завершён; selected=" + selectedNodes.Count + "; exported=" + exported + "; errors=" + errors.Count);
+                string summary = this.FormatLocalizedText("message.export.rawBatch.summary",
+                    "Экспорт сырых P3D-чанков завершён.\nУспешно: {0} из {1}.", exported, selectedNodes.Count);
+                if (orderManifestEntries.Count > 0)
+                    summary += this.FormatLocalizedText("message.export.rawBatch.orderManifest",
+                        "\nСохранён исходный порядок {0} корневых секций в P3DChunkOrder.manifest.", orderManifestEntries.Count);
+                if (errors.Count > 0)
+                {
+                    string errorDetails = string.Join("\n", errors.Take(8));
+                    if (errors.Count > 8)
+                        errorDetails += this.FormatLocalizedText("message.common.andMore", "\n… и ещё {0}.", errors.Count - 8);
+                    summary += this.FormatLocalizedText("message.export.rawBatch.errors",
+                        "\nОшибок: {0}. Подробности: Справка → Журнал событий.\n\n{1}", errors.Count, errorDetails);
+                }
+                this.ShowLocalizedMessageBoxText(this, summary, "caption.export.rawChunks", "Экспорт сырых P3D-чанков",
+                    MessageBoxButtons.OK, errors.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            }
+        }
+
+        private void ExportRawP3DChunk(BaseNode node, Endian endian)
+        {
+            if (node == null) return;
+            string extension = GetRawP3DChunkExtension(node);
+            string name = SanitizeExportFileName(GetCleanName(node)) + extension;
+            using (SaveFileDialog dialog = new SaveFileDialog
+            {
+                Title = UiLocalization.TranslateId("dialog.export.rawChunk.title", "Экспорт сырого P3D-чанка", this._uiLanguage),
+                FileName = name,
+                DefaultExt = extension.TrimStart('.'),
+                AddExtension = false,
+                Filter = this.FormatLocalizedText("filter.exportRawChunk", "Сырой P3D-чанк ({0})|*{0}|Все файлы (*.*)|*.*", extension)
+            })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                string output = dialog.FileName.EndsWith(extension, StringComparison.OrdinalIgnoreCase)
+                    ? dialog.FileName : Path.ChangeExtension(dialog.FileName, extension);
+                try
+                {
+                    ExportNodeAsP3D(node, output, endian);
+                    this.ShowLocalizedMessageBoxById(this, "message.export.rawChunk.fileSuccessShort",
+                        "Сырой чанк экспортирован: {0}", "caption.export", "Экспорт",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information, Path.GetFileName(output));
+                }
+                catch (Exception ex)
+                {
+                    this.ShowLocalizedMessageBoxById(this, "message.export.rawChunk.failed",
+                        "Не удалось экспортировать чанк: {0}", "caption.export", "Экспорт",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+                }
+            }
+        }
+
+        private void OnImportRawP3DChunk()
+        {
+            List<TreeNode> selected = this.GetSelectedTreeNodesForExport();
+            if (selected.Count != 1) return;
+            BaseNode original; Pure3DFile sourceP3D; RcfArchiveItem archiveItem; string error;
+            if (!this.TryResolveTreeP3DNode(selected[0], out original, out sourceP3D, out archiveItem, out error))
+            {
+                this.ShowLocalizedMessageBoxText(this, error, "caption.import.rawChunk", "Импорт сырого чанка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string expectedExtension = GetRawP3DChunkExtension(original);
+            using (OpenFileDialog dialog = new OpenFileDialog
+            {
+                Title = UiLocalization.TranslateId("dialog.import.rawChunk.title", "Импорт сырого P3D-чанка", this._uiLanguage),
+                Filter = this.FormatLocalizedText("filter.importRawChunk", "Сырой чанк данного типа (*{0})|*{0}|P3D/RZ и любые файлы (*.*)|*.*", expectedExtension),
+                Multiselect = false
+            })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    Pure3DFile replacementFile = new Pure3DFile { GamePicked = sourceP3D.GamePicked, Endian = sourceP3D.Endian };
+                    BaseNode replacement = null;
+                    using (FileStream file = File.OpenRead(dialog.FileName))
+                    {
+                        Stream input = file;
+                        MemoryStream decoded = null;
+                        if (Utils.IsRZFile(dialog.FileName))
+                        {
+                            decoded = new MemoryStream();
+                            Utils.DecompressRZ(file, decoded);
+                            decoded.Position = 0;
+                            input = decoded;
+                        }
+                        try
+                        {
+                            if (IsRawP3DChunkFile(dialog.FileName))
+                            {
+                                Endian detectedEndian;
+                                replacement = DeserializeRawP3DChunk(input, sourceP3D.Endian, sourceP3D.GamePicked, dialog.FileName, out detectedEndian);
+                                WriteApplicationLog("RAW_CHUNK_REPLACE_PARSED", "Разобран чанк для замены: " + dialog.FileName + "; type=0x" + replacement.TypeId.ToString("X8") + "; endian=" + detectedEndian + "; bytes=" + input.Length);
+                            }
+                            else
+                            {
+                                replacementFile.Deserialize(input, sourceP3D.Endian);
+                                if (replacementFile.Nodes.Count != 1)
+                                    throw new InvalidDataException("P3D-файл для замены должен содержать ровно одну корневую секцию.");
+                                replacement = replacementFile.Nodes[0];
+                            }
+                        }
+                        finally { if (decoded != null) decoded.Dispose(); }
+                    }
+                    if (replacement.TypeId != original.TypeId || replacement.GetType() != original.GetType())
+                        throw new InvalidDataException("Тип секции в файле не совпадает с выбранной. Ожидается " + original.GetType().Name + " / 0x" + original.TypeId.ToString("X8") + ".");
+
+                    byte[] originalArchiveSnapshot = archiveItem != null && archiveItem.Entry != null && archiveItem.Entry.HasData
+                        ? (byte[])archiveItem.Entry.Data.Clone() : null;
+                    byte[] originalP3DSnapshot = archiveItem == null ? this.SerializeCurrentP3DForHistory() : null;
+                    if (!ReplaceP3DNodeReference(sourceP3D, original, replacement))
+                        throw new InvalidOperationException("Не удалось найти выбранную секцию в родительском списке.");
+
+                    if (archiveItem != null)
+                    {
+                        archiveItem.ParsedFileModified = true;
+                        this.InvalidateRcfEntryCaches(archiveItem);
+                        this.SerializeRcfItem(archiveItem);
+                        byte[] changed = !archiveItem.Entry.HasData ? null : (byte[])archiveItem.Entry.Data.Clone();
+                        this._rcfHasUnsavedChanges = true;
+                        this.ClearUndoRedoHistory();
+                        if (originalArchiveSnapshot != null && changed != null)
+                            this.PushUndoRedoAction(new UndoRedoAction("Импорт сырого чанка " + archiveItem.Name,
+                                () => this.ApplyRcfEntryHistorySnapshot(archiveItem, originalArchiveSnapshot),
+                                () => this.ApplyRcfEntryHistorySnapshot(archiveItem, changed), archiveItem));
+                    }
+                    else
+                    {
+                        this._fileHasUnsavedChanges = true;
+                        byte[] changed = this.SerializeCurrentP3DForHistory();
+                        this.ClearUndoRedoHistory();
+                        if (originalP3DSnapshot != null && changed != null)
+                            this.PushUndoRedoAction(new UndoRedoAction("Импорт сырого чанка " + original.GetType().Name,
+                                () => this.RestoreStandaloneP3DHistorySnapshot(originalP3DSnapshot),
+                                () => this.RestoreStandaloneP3DHistorySnapshot(changed)));
+                    }
+
+                    this.RefreshTree();
+                    TreeNode replacementTreeNode = this.FindTreeNodeByTag(replacement);
+                    if (replacementTreeNode != null)
+                    {
+                        this.nodeTreeView.SelectedNode = replacementTreeNode;
+                        this.OnTreeNodeSelected(replacementTreeNode);
+                    }
+                    else this.OnNodeSelected(replacement);
+                    if (archiveItem != null)
+                        this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " [RCF] *";
+                    else
+                        this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " *";
+                    WriteApplicationLog("RAW_CHUNK_REPLACE_OK", "Заменён чанк type=0x" + replacement.TypeId.ToString("X8") + "; node=" + replacement.GetType().Name + "; source=" + dialog.FileName);
+                    this.ShowLocalizedMessageBoxById(this, "message.import.rawChunk.success",
+                        "Сырой чанк импортирован. Сохраните документ, чтобы записать изменения.", "caption.import.rawChunk", "Импорт сырого чанка",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    WriteApplicationLog("RAW_CHUNK_REPLACE_ERROR", "Не удалось импортировать сырой чанк: " + dialog.FileName, ex);
+                    this.ShowLocalizedMessageBoxById(this, "message.import.rawChunk.failed",
+                        "Не удалось импортировать сырой чанк: {0}\nПодробности записаны в журнал: Справка → Журнал событий.",
+                        "caption.import.error", "Ошибка импорта", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+                }
+            }
+        }
+
+        private static bool ReplaceP3DNodeReference(Pure3DFile p3d, BaseNode original, BaseNode replacement)
+        {
+            if (p3d == null || original == null || replacement == null) return false;
+            List<BaseNode> collection = original.ParentNode != null ? original.ParentNode.Children : p3d.Nodes;
+            int index = collection.FindIndex(candidate => ReferenceEquals(candidate, original));
+            if (index < 0) return false;
+            BaseNode parent = original.ParentNode;
+            replacement.Game = original.Game;
+            replacement.ParentNode = parent;
+            collection[index] = replacement;
+            original.ParentNode = null;
+            return true;
+        }
+
+        private TreeNode FindTreeNodeByTag(object tag)
+        {
+            if (tag == null || this.nodeTreeView == null) return null;
+            Func<TreeNodeCollection, TreeNode> find = null;
+            find = nodes =>
+            {
+                foreach (TreeNode node in nodes)
+                {
+                    if (ReferenceEquals(node.Tag, tag)) return node;
+                    TreeNode child = find(node.Nodes);
+                    if (child != null) return child;
+                }
+                return null;
+            };
+            return find(this.nodeTreeView.Nodes);
+        }
+
+        private static string GetRcfEntryOutputFileName(RcfArchiveItem item)
+        {
+            string name = item == null ? "entry" : (item.Name ?? "entry");
+            name = name.Replace('/', '\\');
+            int slash = name.LastIndexOf('\\');
+            if (slash >= 0) name = name.Substring(slash + 1);
+            if (string.IsNullOrWhiteSpace(name)) name = "entry.bin";
+            return SanitizeExportFileName(name);
+        }
+
+        private static string SanitizeExportFileName(string fileName)
+        {
+            string name = fileName ?? string.Empty;
+            char[] invalid = Path.GetInvalidFileNameChars()
+                .Concat(new[] { '<', '>', ':', '"', '/', '\\', '|', '?', '*' })
+                .Distinct().ToArray();
+
+            // Some Pure3D names come from fixed-length strings and can contain trailing NUL/control
+            // characters. Replacing those with underscores produces names such as "Shape___.obj".
+            // Strip invalid/control characters only at the end; preserve genuine underscores in names.
+            while (name.Length > 0)
+            {
+                char last = name[name.Length - 1];
+                if (char.IsControl(last) || invalid.Contains(last) || last == '.' || last == ' ')
+                    name = name.Substring(0, name.Length - 1);
+                else
+                    break;
+            }
+
+            foreach (char c in invalid) name = name.Replace(c, '_');
+            name = name.Trim().TrimEnd('.', ' ');
+            return string.IsNullOrWhiteSpace(name) ? "asset" : name;
+        }
+
+        private static string GetUniqueExportPath(string directory, string fileName, HashSet<string> usedPaths)
+        {
+            string safeName = SanitizeExportFileName(fileName);
+            string candidate = Path.Combine(directory, safeName);
+            string extension = Path.GetExtension(safeName);
+            string stem = extension.Length > 0 ? safeName.Substring(0, safeName.Length - extension.Length) : safeName;
+            int suffix = 1;
+            while (usedPaths.Contains(candidate) || File.Exists(candidate))
+            {
+                candidate = Path.Combine(directory, stem + "_" + suffix + extension);
+                suffix++;
+            }
+            usedPaths.Add(candidate);
+            return candidate;
+        }
+
+        // 3. Полная распаковка P3D целиком по папкам (Dump)
+        private async void OnDumpWholeP3D()
+        {
+            Pure3DFile sourceFile = this._file;
+            if (sourceFile == null || sourceFile.Nodes == null) return;
+
+            using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog { Title = UiLocalization.TranslateId("dialog.dumpP3D.folderTitle", "Куда распаковать всё содержимое P3D?", this._uiLanguage) })
             {
                 if (mfbd.ShowDialog(this) != DialogResult.OK) return;
 
@@ -842,110 +8335,302 @@ namespace PrototypeUltimateTool
                 string texDir = Path.Combine(outDir, "Textures");
                 string objDir = Path.Combine(outDir, "Models_OBJ");
                 string otherDir = Path.Combine(outDir, "Other_P3D");
-
                 Directory.CreateDirectory(texDir);
                 Directory.CreateDirectory(objDir);
                 Directory.CreateDirectory(otherDir);
 
                 int texCount = 0, modelCount = 0, otherCount = 0;
+                var errors = new List<string>();
+                string sourcePath = this._currentFilePath;
+                Stopwatch dumpTimer = Stopwatch.StartNew();
+                WriteApplicationLog("P3D_DUMP_BEGIN", "Начат полный дамп P3D; rootChunks=" + sourceFile.Nodes.Count + "; source=" + sourcePath);
 
-                // 1. Извлекаем текстуры
-                List<BaseNode> exportable = new List<BaseNode>();
-                CollectExportable(this._file.Nodes, exportable);
-                foreach (var texNode in exportable)
-                {
-                    try
-                    {
-                        string safeName = GetSafeFileName(texNode);
-                        using (FileStream fs = File.Create(Path.Combine(texDir, safeName))) texNode.Export(fs);
-                        texCount++;
-                    }
-                    catch { }
-                }
+                bool wasEnabled = this.Enabled;
+                Cursor previousCursor = this.Cursor;
+                string previousTitle = this.Text;
+                this.Enabled = false;
+                this.UseWaitCursor = true;
+                this.Cursor = Cursors.WaitCursor;
+                this.Text = previousTitle + " — " + UiLocalization.TranslateId("status.dumpP3D.progress", "Распаковка P3D...", this._uiLanguage);
 
-                // 2. Извлекаем 3D-модели в OBJ для Blender
-                foreach (var node in this._file.Nodes)
+                try
                 {
-                    if (node is PolySkin || node is CompositeDrawable)
+                    // Dumping many textures/models can take well over 60 seconds. Keep all file I/O
+                    // and serialization off the WinForms STA thread so Windows/COM messages continue
+                    // to be pumped and the ContextSwitchDeadlock MDA is not triggered.
+                    await Task.Run(() =>
                     {
-                        string cleanName = GetCleanName(node);
-                        string objPath = Path.Combine(objDir, cleanName + ".obj");
-                        if (ExportNodeToObj(node, this._file, objPath)) modelCount++;
-                    }
-                    else if (!exportable.Contains(node))
-                    {
-                        try
+                        var usedTexturePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        var usedModelPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        var usedOtherPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                        List<BaseNode> exportable = new List<BaseNode>();
+                        CollectExportable(sourceFile.Nodes, exportable);
+                        foreach (BaseNode texNode in exportable)
                         {
-                            string safeName = GetCleanName(node) + ".p3d";
-                            var singleP3d = new Pure3DFile();
-                            singleP3d.Nodes.Add(node);
-                            using (FileStream fs = File.Create(Path.Combine(otherDir, safeName))) singleP3d.Serialize(fs, Endian.Little);
-                            otherCount++;
+                            string outputPath = null;
+                            try
+                            {
+                                string safeName = GetSafeFileName(texNode);
+                                outputPath = GetUniqueExportPath(texDir, safeName, usedTexturePaths);
+                                using (FileStream fs = File.Create(outputPath)) texNode.Export(fs);
+                                texCount++;
+                            }
+                            catch (Exception ex)
+                            {
+                                errors.Add(this.FormatLocalizedText("message.dumpP3D.textureError", "Текстура {0}: {1}", GetCleanName(texNode), ex.Message));
+                                WriteApplicationLog("P3D_DUMP_TEXTURE_ERROR", "Не удалось извлечь текстуру: " + GetCleanName(texNode) +
+                                    (outputPath == null ? string.Empty : "; output=" + outputPath), ex);
+                            }
                         }
-                        catch { }
-                    }
+
+                        foreach (BaseNode node in sourceFile.Nodes)
+                        {
+                            if (node is PolySkin || node is Geometry || node is CompositeDrawable)
+                            {
+                                string outputPath = null;
+                                try
+                                {
+                                    string safeName = SanitizeExportFileName(GetCleanName(node)) + ".obj";
+                                    outputPath = GetUniqueExportPath(objDir, safeName, usedModelPaths);
+                                    if (ExportNodeToObj(node, sourceFile, outputPath)) modelCount++;
+                                    else errors.Add(this.FormatLocalizedText("message.dumpP3D.modelNoGroups", "Модель {0}: экспортёр не нашёл пригодные группы геометрии.", GetCleanName(node)));
+                                }
+                                catch (Exception ex)
+                                {
+                                    errors.Add(this.FormatLocalizedText("message.dumpP3D.modelError", "Модель {0}: {1}", GetCleanName(node), ex.Message));
+                                    WriteApplicationLog("P3D_DUMP_MODEL_ERROR", "Не удалось выгрузить модель: " + GetCleanName(node) +
+                                        (outputPath == null ? string.Empty : "; output=" + outputPath), ex);
+                                }
+                            }
+                            else if (!exportable.Contains(node))
+                            {
+                                string outputPath = null;
+                                try
+                                {
+                                    string safeName = SanitizeExportFileName(GetCleanName(node)) + ".p3d";
+                                    outputPath = GetUniqueExportPath(otherDir, safeName, usedOtherPaths);
+                                    var singleP3D = new Pure3DFile { GamePicked = sourceFile.GamePicked, Endian = sourceFile.Endian };
+                                    singleP3D.Nodes.Add(node);
+                                    using (FileStream fs = File.Create(outputPath)) singleP3D.Serialize(fs, sourceFile.Endian);
+                                    otherCount++;
+                                }
+                                catch (Exception ex)
+                                {
+                                    errors.Add(this.FormatLocalizedText("message.dumpP3D.sectionError", "Секция {0}: {1}", GetCleanName(node), ex.Message));
+                                    WriteApplicationLog("P3D_DUMP_NODE_ERROR", "Не удалось выгрузить секцию: " + GetCleanName(node) +
+                                        (outputPath == null ? string.Empty : "; output=" + outputPath), ex);
+                                }
+                            }
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    errors.Add(this.FormatLocalizedText("message.dumpP3D.workerError", "Ошибка фоновой распаковки: {0}", ex.Message));
+                    WriteApplicationLog("P3D_DUMP_WORKER_ERROR", "Фоновая распаковка P3D завершилась ошибкой; source=" + sourcePath, ex);
+                }
+                finally
+                {
+                    this.Enabled = wasEnabled;
+                    this.UseWaitCursor = false;
+                    this.Cursor = previousCursor;
+                    this.Text = previousTitle;
+                    if (!this.IsDisposed) this.Activate();
                 }
 
-                MessageBox.Show(string.Format("Полный дамп P3D завершён!\n\n📁 Текстур (DDS): {0}\n🧊 3D-моделей (OBJ для Blender): {1}\n📦 Прочих узлов: {2}", texCount, modelCount, otherCount), "Распаковка P3D", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                dumpTimer.Stop();
+                WriteApplicationLog("P3D_DUMP_COMPLETE", "P3D dump завершён; textures=" + texCount + "; models=" + modelCount +
+                    "; otherNodes=" + otherCount + "; errors=" + errors.Count + "; elapsedMs=" + dumpTimer.ElapsedMilliseconds + "; source=" + sourcePath);
+                string summary = this.FormatLocalizedText("message.dumpP3D.summary",
+                    "Полный дамп P3D завершён!\n\n📁 Текстур (DDS): {0}\n🧊 3D-моделей (OBJ для Blender): {1}\n📦 Прочих узлов: {2}\nОшибок/пропусков: {3}",
+                    texCount, modelCount, otherCount, errors.Count);
+                if (errors.Count > 0)
+                {
+                    summary += this.FormatLocalizedText("message.dumpP3D.details",
+                        "\n\nПодробности записаны в Справка → Журнал событий.\n\n{0}", string.Join("\n", errors.Take(8)));
+                    if (errors.Count > 8) summary += this.FormatLocalizedText("message.common.andMore", "\n… и ещё {0}.", errors.Count - 8);
+                }
+                this.ShowLocalizedMessageBoxText(this, summary, "caption.dumpP3D", "Распаковка P3D", MessageBoxButtons.OK,
+                    errors.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
             }
         }
 
-        // Конвертер 3D-нод в формат Wavefront OBJ (сразу открывается в Blender)
+        // Экспортирует геометрию и MTL, сохраняя исходные имена ресурсов.
+        // Файлы изображений не создаются: MTL только ссылается на оригинальное имя текстуры.
         private static bool ExportNodeToObj(BaseNode node, Pure3DFile p3d, string filePath)
         {
             try
             {
-                List<PrimitiveGroup> groups = new List<PrimitiveGroup>();
-                if (node is PrimitiveGroup pg) groups.Add(pg);
-                else if (node is PolySkin ps) CollectPrimitiveGroupsRecursively(ps, groups);
-                else if (node is CompositeDrawable cd)
+                List<Prototype1GeometryReader.PrimitiveGroupSource> sources =
+                    Prototype1GeometryReader.ResolveGroups(node, p3d);
+                if (sources == null || sources.Count == 0)
+                    return false;
+
+                var parts = new List<ObjExportPart>();
+                foreach (Prototype1GeometryReader.PrimitiveGroupSource source in sources)
                 {
-                    CollectPrimitiveGroupsRecursively(cd, groups);
-                    if (groups.Count == 0 && p3d != null)
+                    if (source == null || source.Group == null)
+                        continue;
+
+                    Prototype1GeometryData data = Prototype1GeometryReader.Read(source.Group);
+                    if (data == null || data.Positions == null || data.Triangles == null ||
+                        data.Positions.Count == 0 || data.Triangles.Count == 0)
+                        continue;
+
+                    ObjExportPart part = BuildObjExportPart(data, source.OwnerName);
+                    if (part == null || part.Faces.Count == 0)
+                        continue;
+
+                    string materialKey = !string.IsNullOrWhiteSpace(data.ShaderName)
+                        ? "shader:" + data.ShaderName.Trim()
+                        : "part:" + (source.OwnerName ?? "Part").Trim();
+                    part.MaterialKey = materialKey;
+                    parts.Add(part);
+                }
+
+                if (parts.Count == 0)
+                    return false;
+
+                string outputDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath));
+                string rawObjStem = Path.GetFileNameWithoutExtension(filePath);
+                // The MTL keeps the exact same base name as its OBJ. Do not add hashes or prefixes.
+                string materialFileName = rawObjStem + ".mtl";
+                string materialFilePath = Path.Combine(outputDirectory, materialFileName);
+
+                var materialByKey = new Dictionary<string, ObjMaterialInfo>(StringComparer.OrdinalIgnoreCase);
+                var usedMaterialNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var materials = new List<ObjMaterialInfo>();
+
+                foreach (ObjExportPart part in parts)
+                {
+                    ObjMaterialInfo material;
+                    if (!materialByKey.TryGetValue(part.MaterialKey, out material))
                     {
-                        string cdName = GetCleanName(cd);
-                        foreach (var n in p3d.Nodes)
+                        string shaderName = part.MaterialKey.StartsWith("shader:", StringComparison.OrdinalIgnoreCase)
+                            ? part.MaterialKey.Substring("shader:".Length)
+                            : null;
+                        string ownerName = part.OwnerName;
+                        BaseNode shaderNode = FindObjShader(shaderName, p3d);
+                        string proposedName = !string.IsNullOrWhiteSpace(shaderName)
+                            ? shaderName
+                            : (string.IsNullOrWhiteSpace(ownerName) ? "default" : ownerName);
+                        string materialName = MakeUniqueObjMaterialName(proposedName, usedMaterialNames);
+
+                        BaseNode materialTextureNode = ResolveObjMaterialTexture(shaderName, ownerName, shaderNode, p3d);
+                        material = new ObjMaterialInfo
                         {
-                            if (n is PolySkin skin && GetCleanName(skin).IndexOf(cdName, StringComparison.OrdinalIgnoreCase) >= 0)
-                                CollectPrimitiveGroupsRecursively(skin, groups);
-                        }
+                            Key = part.MaterialKey,
+                            Name = materialName,
+                            // Textured materials use white so Kd does not tint/darken the source image.
+                            // Untextured parts use the same neutral fallback as the 3D viewer.
+                            Red = materialTextureNode != null ? 1.0 : 0.843,
+                            Green = materialTextureNode != null ? 1.0 : 0.843,
+                            Blue = materialTextureNode != null ? 1.0 : 0.863,
+                            TextureFileName = GetObjTextureReferenceName(materialTextureNode)
+                        };
+                        ReadObjMaterialColor(shaderNode, material);
+                        materialByKey.Add(part.MaterialKey, material);
+                        materials.Add(material);
+                    }
+                    part.MaterialName = material.Name;
+                }
+
+                // Do not export/copy images here. map_Kd references the original texture resource name.
+
+                // Write the sidecar material library before the OBJ so its references are present on disk.
+                using (StreamWriter mtl = new StreamWriter(materialFilePath, false, new System.Text.UTF8Encoding(false)))
+                {
+                    mtl.WriteLine("# Prototype Ultimate Tool - Wavefront material library");
+                    mtl.WriteLine("# Materials resolved from Pure3D shader sections");
+                    foreach (ObjMaterialInfo material in materials)
+                    {
+                        mtl.WriteLine();
+                        mtl.WriteLine("newmtl " + material.Name);
+                        mtl.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                            "Ka {0:F6} {1:F6} {2:F6}", material.Red * 0.2, material.Green * 0.2, material.Blue * 0.2));
+                        mtl.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                            "Kd {0:F6} {1:F6} {2:F6}", material.Red, material.Green, material.Blue));
+                        mtl.WriteLine("Ks 0.000000 0.000000 0.000000");
+                        mtl.WriteLine("Ns 10.000000");
+                        mtl.WriteLine("d 1.000000");
+                        mtl.WriteLine("illum 2");
+                        if (!string.IsNullOrWhiteSpace(material.TextureFileName))
+                            mtl.WriteLine("map_Kd " + material.TextureFileName.Replace('\\', '/'));
                     }
                 }
 
-                if (groups.Count == 0) return false;
-
-                using (StreamWriter sw = new StreamWriter(filePath))
+                using (StreamWriter sw = new StreamWriter(filePath, false, new System.Text.UTF8Encoding(false)))
                 {
-                    sw.WriteLine("# Prototype Ultimate Tool - 3D OBJ Export");
+                    sw.WriteLine("# Prototype Ultimate Tool - Pure3D OBJ Export");
                     sw.WriteLine("# Model: " + GetCleanName(node));
+                    sw.WriteLine("mtllib " + materialFileName);
 
-                    int vertOffset = 1;
+                    int vertexOffset = 1;
+                    int uvOffset = 1;
+                    int normalOffset = 1;
                     int groupIndex = 1;
 
-                    foreach (var g in groups)
+                    foreach (ObjExportPart part in parts)
                     {
-                        var rawVerts = Nixson.Prototype1.ImportP3D.GetPositionVertices(g);
-                        var rawFaces = Nixson.Prototype1.ImportP3D.GetFaces(g);
-                        if (rawVerts == null || rawFaces == null || rawVerts.Count == 0 || rawFaces.Count == 0) continue;
+                        sw.WriteLine();
+                        // Keep the source part name intact; use the original model name only when absent.
+                        string objectName = string.IsNullOrWhiteSpace(part.OwnerName) ? rawObjStem : part.OwnerName;
+                        sw.WriteLine("o " + NormalizeObjLabel(objectName));
 
-                        sw.WriteLine("o Part_" + groupIndex);
-
-                        foreach (var v in rawVerts)
+                        foreach (ObjVector3 vertex in part.Positions)
                         {
-                            sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture, "v {0:F4} {1:F4} {2:F4}", v.X * 1000f, v.Z * -1000f, v.Y * 1000f));
+                            sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                                "v {0:F6} {1:F6} {2:F6}", vertex.X, vertex.Y, vertex.Z));
                         }
 
-                        foreach (var f in rawFaces)
+                        if (part.HasUvs)
                         {
-                            sw.WriteLine(string.Format("f {0} {1} {2}", f.Point1 + vertOffset, f.Point3 + vertOffset, f.Point2 + vertOffset));
+                            foreach (UVCoordinate uv in part.UVs)
+                                sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                                    "vt {0:F6} {1:F6}", uv.U, uv.V));
                         }
 
-                        vertOffset += rawVerts.Count;
+                        foreach (ObjVector3 normal in part.Normals)
+                        {
+                            sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                                "vn {0:F6} {1:F6} {2:F6}", normal.X, normal.Y, normal.Z));
+                        }
+
+                        sw.WriteLine("usemtl " + part.MaterialName);
+                        sw.WriteLine("s 1");
+                        foreach (ObjFace face in part.Faces)
+                        {
+                            int a = face.A + vertexOffset;
+                            int b = face.B + vertexOffset;
+                            int c = face.C + vertexOffset;
+                            int na = face.A + normalOffset;
+                            int nb = face.B + normalOffset;
+                            int nc = face.C + normalOffset;
+                            if (part.HasUvs)
+                            {
+                                int ta = face.A + uvOffset;
+                                int tb = face.B + uvOffset;
+                                int tc = face.C + uvOffset;
+                                sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                                    "f {0}/{1}/{2} {3}/{4}/{5} {6}/{7}/{8}", a, ta, na, b, tb, nb, c, tc, nc));
+                            }
+                            else
+                            {
+                                sw.WriteLine(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                                    "f {0}//{1} {2}//{3} {4}//{5}", a, na, b, nb, c, nc));
+                            }
+                        }
+
+                        vertexOffset += part.Positions.Count;
+                        if (part.HasUvs) uvOffset += part.UVs.Count;
+                        normalOffset += part.Normals.Count;
                         groupIndex++;
                     }
                 }
 
-                return true;
+                return parts.Count > 0 && File.Exists(filePath) && new FileInfo(filePath).Length > 0 &&
+                    File.Exists(materialFilePath) && new FileInfo(materialFilePath).Length > 0;
             }
             catch
             {
@@ -953,57 +8638,1207 @@ namespace PrototypeUltimateTool
             }
         }
 
+        private static ObjExportPart BuildObjExportPart(Prototype1GeometryData data, string ownerName)
+        {
+            var part = new ObjExportPart { OwnerName = ownerName ?? string.Empty };
+            foreach (Nixson.Common.Vector3 vertex in data.Positions)
+            {
+                if (vertex == null || float.IsNaN(vertex.X) || float.IsInfinity(vertex.X) ||
+                    float.IsNaN(vertex.Y) || float.IsInfinity(vertex.Y) ||
+                    float.IsNaN(vertex.Z) || float.IsInfinity(vertex.Z))
+                    return null;
+                part.Positions.Add(new ObjVector3(vertex.X * 1000.0, vertex.Z * -1000.0, vertex.Y * 1000.0));
+            }
+
+            part.HasUvs = data.UVs != null && data.UVs.Count == data.Positions.Count && data.UVs.All(uv => uv != null);
+            if (part.HasUvs) part.UVs.AddRange(data.UVs);
+
+            bool hasSourceNormals = data.Normals != null && data.Normals.Count == data.Positions.Count &&
+                data.Normals.All(normal => normal != null && IsFiniteVector(normal.X, normal.Y, normal.Z));
+            var sourceNormals = new List<ObjVector3>();
+            if (hasSourceNormals)
+            {
+                foreach (Nixson.Common.Vector3 normal in data.Normals)
+                {
+                    ObjVector3 transformed = new ObjVector3(normal.X, -normal.Z, normal.Y).Normalized();
+                    if (transformed.LengthSquared < 1e-12)
+                    {
+                        hasSourceNormals = false;
+                        break;
+                    }
+                    sourceNormals.Add(transformed);
+                }
+            }
+            if (!hasSourceNormals) sourceNormals.Clear();
+
+            // Decide winding once per primitive group. If imported vertex normals consistently face
+            // against the raw triangles, reverse every triangle; otherwise keep the original order.
+            // When the source stream has no usable normals, preserve the legacy reversed winding.
+            int alignedFaces = 0;
+            int opposedFaces = 0;
+            if (hasSourceNormals)
+            {
+                foreach (TriangleIndices face in data.Triangles)
+                {
+                    if (!IsValidObjFace(face, part.Positions.Count)) continue;
+                    ObjVector3 edge1 = part.Positions[face.B] - part.Positions[face.A];
+                    ObjVector3 edge2 = part.Positions[face.C] - part.Positions[face.A];
+                    ObjVector3 geometric = ObjVector3.Cross(edge1, edge2);
+                    ObjVector3 averageNormal = sourceNormals[face.A] + sourceNormals[face.B] + sourceNormals[face.C];
+                    double dot = ObjVector3.Dot(geometric, averageNormal);
+                    if (dot > 1e-10) alignedFaces++;
+                    else if (dot < -1e-10) opposedFaces++;
+                }
+            }
+            bool reverseWinding = !hasSourceNormals || opposedFaces > alignedFaces;
+
+            foreach (TriangleIndices rawFace in data.Triangles)
+            {
+                if (!IsValidObjFace(rawFace, part.Positions.Count)) continue;
+                part.Faces.Add(reverseWinding
+                    ? new ObjFace(rawFace.A, rawFace.C, rawFace.B)
+                    : new ObjFace(rawFace.A, rawFace.B, rawFace.C));
+            }
+            if (part.Faces.Count == 0) return null;
+
+            // Rebuild normals from the exact triangles that will be written to OBJ. The old exporter
+            // copied the source normal stream while changing triangle winding unconditionally; that
+            // could make Blender shade the mesh incorrectly until normals were recalculated manually.
+            var accumulatedNormals = new ObjVector3[part.Positions.Count];
+            foreach (ObjFace face in part.Faces)
+            {
+                ObjVector3 edge1 = part.Positions[face.B] - part.Positions[face.A];
+                ObjVector3 edge2 = part.Positions[face.C] - part.Positions[face.A];
+                ObjVector3 faceNormal = ObjVector3.Cross(edge1, edge2);
+                if (faceNormal.LengthSquared < 1e-20) continue;
+                accumulatedNormals[face.A] = accumulatedNormals[face.A] + faceNormal;
+                accumulatedNormals[face.B] = accumulatedNormals[face.B] + faceNormal;
+                accumulatedNormals[face.C] = accumulatedNormals[face.C] + faceNormal;
+            }
+
+            for (int i = 0; i < accumulatedNormals.Length; i++)
+            {
+                ObjVector3 normal = accumulatedNormals[i].Normalized();
+                if (normal.LengthSquared < 1e-12 && hasSourceNormals)
+                    normal = sourceNormals[i];
+                if (normal.LengthSquared < 1e-12)
+                    normal = new ObjVector3(0, 0, 1);
+                part.Normals.Add(normal);
+            }
+            return part;
+        }
+
+        private static bool IsValidObjFace(TriangleIndices face, int vertexCount)
+        {
+            return face.A >= 0 && face.B >= 0 && face.C >= 0 &&
+                face.A < vertexCount && face.B < vertexCount && face.C < vertexCount &&
+                face.A != face.B && face.B != face.C && face.A != face.C;
+        }
+
+        private static bool IsFiniteVector(float x, float y, float z)
+        {
+            return !float.IsNaN(x) && !float.IsInfinity(x) &&
+                !float.IsNaN(y) && !float.IsInfinity(y) &&
+                !float.IsNaN(z) && !float.IsInfinity(z);
+        }
+
+        private static string NormalizeObjLabel(string value)
+        {
+            // OBJ/MTL labels occupy a single directive line, but otherwise keep the original name.
+            return (value ?? string.Empty).Replace('\r', ' ').Replace('\n', ' ').Trim();
+        }
+
+        private static string GetObjTextureReferenceName(BaseNode textureNode)
+        {
+            if (textureNode == null) return null;
+            string textureName = GetCleanName(textureNode);
+            if (string.IsNullOrWhiteSpace(textureName)) return null;
+
+            // Texture chunks often store a bare resource name. Use the node's established export
+            // extension in the reference, but never create a duplicate image file.
+            string extension = textureNode.ExportExtension;
+            if (!string.IsNullOrWhiteSpace(extension))
+            {
+                if (!extension.StartsWith(".", StringComparison.Ordinal)) extension = "." + extension;
+                if (!textureName.EndsWith(extension, StringComparison.OrdinalIgnoreCase) &&
+                    string.IsNullOrEmpty(Path.GetExtension(textureName)))
+                    textureName += extension;
+            }
+            return textureName;
+        }
+
+        private static string MakeUniqueObjMaterialName(string proposedName, HashSet<string> usedNames)
+        {
+            string stem = NormalizeObjLabel(proposedName);
+            if (string.IsNullOrWhiteSpace(stem)) stem = "default";
+            string candidate = stem;
+            int suffix = 1;
+            while (usedNames.Contains(candidate))
+            {
+                candidate = stem + "_" + suffix.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                suffix++;
+            }
+            usedNames.Add(candidate);
+            return candidate;
+        }
+
+        private static BaseNode FindObjShader(string shaderName, Pure3DFile p3d)
+        {
+            if (string.IsNullOrWhiteSpace(shaderName) || p3d == null || p3d.Nodes == null)
+                return null;
+            List<BaseNode> allNodes = EnumerateObjNodes(p3d.Nodes).ToList();
+            BaseNode shader = allNodes.FirstOrDefault(candidate => candidate is NewShader &&
+                GetCleanName(candidate).Equals(shaderName, StringComparison.OrdinalIgnoreCase));
+            if (shader != null) return shader;
+            return allNodes.FirstOrDefault(candidate =>
+                candidate.GetType().Name.IndexOf("Shader", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                candidate.GetType().Name.IndexOf("Property", StringComparison.OrdinalIgnoreCase) < 0 &&
+                GetCleanName(candidate).Equals(shaderName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static BaseNode ResolveObjMaterialTexture(string shaderName, string ownerName, BaseNode shaderNode, Pure3DFile p3d)
+        {
+            if (p3d == null || p3d.Nodes == null) return null;
+            List<BaseNode> allNodes = EnumerateObjNodes(p3d.Nodes).ToList();
+            string textureName = GetObjShaderTextureName(shaderNode);
+            List<BaseNode> candidates = allNodes.Where(IsObjTextureCandidate).ToList();
+
+            if (!string.IsNullOrWhiteSpace(textureName))
+            {
+                BaseNode exact = candidates.FirstOrDefault(candidate =>
+                    GetCleanName(candidate).Equals(textureName, StringComparison.OrdinalIgnoreCase));
+                if (exact != null) return exact;
+
+                string textureLeaf = Path.GetFileName(textureName.Replace('/', '\\'));
+                exact = candidates.FirstOrDefault(candidate =>
+                    GetCleanName(candidate).Equals(textureLeaf, StringComparison.OrdinalIgnoreCase));
+                if (exact != null) return exact;
+
+                BaseNode contains = candidates.FirstOrDefault(candidate =>
+                    GetCleanName(candidate).IndexOf(textureName, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    textureName.IndexOf(GetCleanName(candidate), StringComparison.OrdinalIgnoreCase) >= 0);
+                if (contains != null) return contains;
+            }
+
+            // Match the viewer's existing fallback: when shader metadata is absent/incomplete, infer a
+            // likely diffuse map from the mesh/part name, but never dump unrelated archive textures.
+            string[] shapeTokens = (ownerName ?? string.Empty).ToLowerInvariant()
+                .Split(new[] { '_', ' ', '.' }, StringSplitOptions.RemoveEmptyEntries);
+            BaseNode best = null;
+            int bestScore = 0;
+            foreach (BaseNode candidate in candidates)
+            {
+                string texName = GetCleanName(candidate).ToLowerInvariant();
+                if (!texName.Contains("_dm") && !texName.Contains("diffuse") && !texName.Contains("color") && !texName.Contains("albedo"))
+                    continue;
+                int score = 0;
+                foreach (string token in shapeTokens)
+                    if (token.Length >= 3 && texName.Contains(token)) score += 10;
+                string shapeLower = (ownerName ?? string.Empty).ToLowerInvariant();
+                if ((shapeLower.Contains("head") || shapeLower.Contains("face")) && texName.Contains("head")) score += 25;
+                if ((shapeLower.Contains("body") || shapeLower.Contains("arm") || shapeLower.Contains("vest") ||
+                    shapeLower.Contains("torso") || shapeLower.Contains("leg")) && texName.Contains("body")) score += 20;
+                if (score > bestScore) { bestScore = score; best = candidate; }
+            }
+            return best;
+        }
+
+        private static string GetObjShaderTextureName(BaseNode shaderNode)
+        {
+            if (shaderNode == null || shaderNode.Children == null) return null;
+            var textureProperties = EnumerateObjNodes(shaderNode.Children)
+                .OfType<ShaderPropertyTexture>()
+                .Where(property => !string.IsNullOrWhiteSpace(property.Value))
+                .OrderByDescending(property => ObjTexturePropertyPriority(property.Name))
+                .ToList();
+            if (textureProperties.Count > 0)
+                return textureProperties[0].Value.Trim();
+
+            foreach (BaseNode child in shaderNode.Children)
+            {
+                var valueProperty = child.GetType().GetProperty("Value") ?? child.GetType().GetProperty("TextureName");
+                if (valueProperty != null)
+                {
+                    string value = valueProperty.GetValue(child, null) as string;
+                    if (!string.IsNullOrWhiteSpace(value)) return value.Trim();
+                }
+                string text = child.ToString() ?? string.Empty;
+                int extensionIndex = text.IndexOf(".dds", StringComparison.OrdinalIgnoreCase);
+                if (extensionIndex >= 0)
+                {
+                    int open = text.IndexOf('(');
+                    int close = text.LastIndexOf(')');
+                    if (open >= 0 && close > open) return text.Substring(open + 1, close - open - 1).Trim();
+                }
+            }
+            return null;
+        }
+
+        private static int ObjTexturePropertyPriority(string name)
+        {
+            string value = (name ?? string.Empty).ToLowerInvariant();
+            if (value.Contains("diffuse") || value.Contains("albedo") || value.Contains("basecolor") || value.Contains("base_color")) return 4;
+            if (value.Contains("color") || value.Contains("colour")) return 3;
+            if (value.Contains("texture") || value.Contains("map")) return 2;
+            return 1;
+        }
+
+        private static bool IsObjTextureCandidate(BaseNode node)
+        {
+            if (node == null) return false;
+            if (node is Texture || node is TextureDDS || node is TexturePNG) return true;
+            string typeName = node.GetType().Name;
+            return typeName.IndexOf("Texture", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                !(node is TextureData);
+        }
+
+        private static void ReadObjMaterialColor(BaseNode shaderNode, ObjMaterialInfo material)
+        {
+            if (shaderNode == null || shaderNode.Children == null || material == null) return;
+            List<ShaderPropertyColor> colorProperties = EnumerateObjNodes(shaderNode.Children)
+                .OfType<ShaderPropertyColor>().ToList();
+            if (colorProperties.Count == 0) return;
+
+            ShaderPropertyColor selected = colorProperties.FirstOrDefault(property =>
+            {
+                string name = (property.Name ?? string.Empty).ToLowerInvariant();
+                return name.Contains("diffuse") || name.Contains("albedo") || name.Contains("basecolor") ||
+                    name.Contains("base_color") || name == "kd" || name.Contains("color") || name.Contains("colour");
+            }) ?? colorProperties[0];
+
+            double red = selected.R, green = selected.G, blue = selected.B;
+            double max = Math.Max(red, Math.Max(green, blue));
+            if (max > 1.0 && max <= 255.0)
+            {
+                red /= 255.0; green /= 255.0; blue /= 255.0;
+            }
+            material.Red = Clamp01(red);
+            material.Green = Clamp01(green);
+            material.Blue = Clamp01(blue);
+        }
+
+        private static double Clamp01(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value)) return 1.0;
+            return Math.Max(0.0, Math.Min(1.0, value));
+        }
+
+        private static IEnumerable<BaseNode> EnumerateObjNodes(IEnumerable<BaseNode> nodes)
+        {
+            if (nodes == null) yield break;
+            foreach (BaseNode node in nodes)
+            {
+                if (node == null) continue;
+                yield return node;
+                if (node.Children != null)
+                    foreach (BaseNode child in EnumerateObjNodes(node.Children)) yield return child;
+            }
+        }
+
+        private sealed class ObjExportPart
+        {
+            public string OwnerName;
+            public string MaterialKey;
+            public string MaterialName;
+            public bool HasUvs;
+            public readonly List<ObjVector3> Positions = new List<ObjVector3>();
+            public readonly List<UVCoordinate> UVs = new List<UVCoordinate>();
+            public readonly List<ObjFace> Faces = new List<ObjFace>();
+            public readonly List<ObjVector3> Normals = new List<ObjVector3>();
+        }
+
+        private sealed class ObjMaterialInfo
+        {
+            public string Key;
+            public string Name;
+            public string TextureFileName;
+            public double Red;
+            public double Green;
+            public double Blue;
+        }
+
+        private struct ObjFace
+        {
+            public int A;
+            public int B;
+            public int C;
+            public ObjFace(int a, int b, int c) { A = a; B = b; C = c; }
+        }
+
+        private struct ObjVector3
+        {
+            public double X;
+            public double Y;
+            public double Z;
+            public ObjVector3(double x, double y, double z) { X = x; Y = y; Z = z; }
+            public double LengthSquared { get { return X * X + Y * Y + Z * Z; } }
+            public ObjVector3 Normalized()
+            {
+                double length = Math.Sqrt(this.LengthSquared);
+                if (length <= 1e-15 || double.IsNaN(length) || double.IsInfinity(length)) return new ObjVector3(0, 0, 0);
+                return new ObjVector3(X / length, Y / length, Z / length);
+            }
+            public static ObjVector3 Cross(ObjVector3 a, ObjVector3 b)
+            {
+                return new ObjVector3(a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+            }
+            public static double Dot(ObjVector3 a, ObjVector3 b) { return a.X * b.X + a.Y * b.Y + a.Z * b.Z; }
+            public static ObjVector3 operator +(ObjVector3 a, ObjVector3 b) { return new ObjVector3(a.X + b.X, a.Y + b.Y, a.Z + b.Z); }
+            public static ObjVector3 operator -(ObjVector3 a, ObjVector3 b) { return new ObjVector3(a.X - b.X, a.Y - b.Y, a.Z - b.Z); }
+        }
+
         private void OnReplaceTexture()
         {
-            var node = this.nodeTreeView.SelectedNode != null ? this.nodeTreeView.SelectedNode.Tag as BaseNode : null;
-            if (node == null || !node.Importable)
+            List<TreeNode> selectedNodes = this.GetSelectedTreeNodesForExport();
+            if (selectedNodes.Count != 1)
             {
-                MessageBox.Show("Выберите элемент, поддерживающий замену данных (например, текстуру).", "Импорт", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                this.ShowLocalizedMessageBoxById(this, "message.replace.singleItemOnly",
+                    "Замена данных выполняется для одного элемента. Выберите один файл или поддерживающий импорт элемент.",
+                    "caption.import", "Импорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
-            using (OpenFileDialog ofd = new OpenFileDialog { Filter = "DDS Textures (*.dds)|*.dds|Все файлы (*.*)|*.*" })
+            TreeNode selectedTreeNode = selectedNodes[0];
+            var archiveItem = selectedTreeNode.Tag as RcfArchiveItem;
+            if (archiveItem != null)
+            {
+                using (OpenFileDialog replaceArchiveEntry = new OpenFileDialog
+                {
+                    Title = UiLocalization.TranslateId("dialog.replace.archiveEntry.title", "Заменить содержимое записи RCF", this._uiLanguage),
+                    Filter = UiLocalization.TranslateId("filter.allFiles", "Все файлы (*.*)|*.*", this._uiLanguage)
+                })
+                {
+                    if (replaceArchiveEntry.ShowDialog(this) != DialogResult.OK) return;
+                    try
+                    {
+                        if (archiveItem.Entry == null)
+                            throw new InvalidOperationException(UiLocalization.TranslateId("message.replace.archive.noData",
+                                "Для этой записи не найден блок данных.", this._uiLanguage));
+                        byte[] replacement = File.ReadAllBytes(replaceArchiveEntry.FileName);
+                        // When a plain .p3d is dropped onto an archived .p3d.rz entry,
+                        // keep the entry's declared storage format consistent with its name.
+                        if (Utils.IsRZFile(archiveItem.Name) &&
+                            Path.GetExtension(replaceArchiveEntry.FileName).Equals(".p3d", StringComparison.OrdinalIgnoreCase))
+                        {
+                            using (var raw = new MemoryStream(replacement, false))
+                            using (Stream compressed = Utils.CompressRZ(raw))
+                            using (var packed = new MemoryStream())
+                            {
+                                compressed.CopyTo(packed);
+                                replacement = packed.ToArray();
+                            }
+                        }
+                        else if (archiveItem.Name.EndsWith(".p3d", StringComparison.OrdinalIgnoreCase) &&
+                            Utils.IsRZFile(replaceArchiveEntry.FileName))
+                        {
+                            using (var packed = new MemoryStream(replacement, false))
+                            using (var raw = new MemoryStream())
+                            {
+                                Utils.DecompressRZ(packed, raw);
+                                replacement = raw.ToArray();
+                            }
+                        }
+                        byte[] originalArchiveData = !archiveItem.Entry.HasData ? null : (byte[])archiveItem.Entry.Data.Clone();
+                        byte[] replacementArchiveData = (byte[])replacement.Clone();
+                        archiveItem.Entry.Data = replacement;
+                        archiveItem.Entry.Size = (uint)archiveItem.Entry.DataLength;
+                        this._rcfHasUnsavedChanges = true;
+                        archiveItem.ParseAttempted = false;
+                        archiveItem.ParsedFile = null;
+                        archiveItem.ParseError = null;
+                        archiveItem.ParsedFileModified = false;
+                        this.InvalidateRcfEntryCaches(archiveItem);
+                        archiveItem.TextureScanAttempted = false;
+                        archiveItem.TextureHits = null;
+                        archiveItem.TextureScanError = null;
+                        this.RefreshRcfTree(archiveItem);
+                        this.ClearUndoRedoHistory();
+                        this.PushUndoRedoAction(new UndoRedoAction("Замена записи " + archiveItem.Name,
+                            () => this.ApplyRcfEntryHistorySnapshot(archiveItem, originalArchiveData),
+                            () => this.ApplyRcfEntryHistorySnapshot(archiveItem, replacementArchiveData), archiveItem));
+                        this.ShowLocalizedMessageBoxById(this, "message.replace.archive.success",
+                            "Данные записи заменены в памяти. Нажмите «Сохранить», чтобы записать изменения в RCF.",
+                            "caption.rcf", "RCF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        this.ShowLocalizedMessageBoxById(this, "message.replace.archive.failed",
+                            "Ошибка замены записи: {0}", "caption.error", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+                    }
+                }
+                return;
+            }
+
+            var node = selectedTreeNode != null ? selectedTreeNode.Tag as BaseNode : null;
+            if (node == null && selectedTreeNode != null)
+            {
+                var hit = selectedTreeNode.Tag as RcfTextureSearchHit;
+                if (hit != null && hit.Item != null && hit.Item.ParsedFile != null)
+                    node = ResolveRcfTextureHit(hit.Item.ParsedFile, hit.PathIndices);
+            }
+            if (node == null || !node.Importable)
+            {
+                this.ShowLocalizedMessageBoxById(this, "message.replace.importableRequired",
+                    "Выберите элемент, поддерживающий замену данных (например, текстуру).", "caption.import", "Импорт",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            using (OpenFileDialog ofd = new OpenFileDialog
+            {
+                Title = UiLocalization.TranslateId("dialog.replace.resource.title", "Выберите файл для замены данных", this._uiLanguage),
+                Filter = UiLocalization.TranslateId("filter.replaceTexture", "DDS-текстуры (*.dds)|*.dds|Все файлы (*.*)|*.*", this._uiLanguage)
+            })
             {
                 if (ofd.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
+                    RcfArchiveItem entryBeingEdited = this._activeRcfItem;
+                    byte[] originalRcfEntryData = entryBeingEdited != null && entryBeingEdited.Entry != null && entryBeingEdited.Entry.HasData
+                        ? (byte[])entryBeingEdited.Entry.Data.Clone() : null;
+                    byte[] originalP3DSnapshot = entryBeingEdited == null && this._file != null
+                        ? this.SerializeCurrentP3DForHistory() : null;
                     using (FileStream fs = File.OpenRead(ofd.FileName)) node.Import(fs);
                     this.ReloadPreview();
-                    MessageBox.Show("Данные успешно заменены! Не забудьте сохранить P3D файл.", "Импорт", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (this._activeRcfItem != null)
+                    {
+                        // Imported data belongs to the parsed P3D node inside the active RCF
+                        // entry. Push it back to Entry.Data immediately, like PropertyGrid edits.
+                        RcfArchiveItem changedEntry = this._activeRcfItem;
+                        changedEntry.ParsedFileModified = true;
+                        this.SyncActiveRcfEntry();
+                        byte[] changedRcfEntryData = changedEntry.Entry != null && changedEntry.Entry.HasData
+                            ? (byte[])changedEntry.Entry.Data.Clone() : null;
+                        if (this._onlyTextures) this.RefreshRcfTree(changedEntry);
+                        if (originalRcfEntryData != null && changedRcfEntryData != null)
+                        {
+                            this.ClearUndoRedoHistory();
+                            this.PushUndoRedoAction(new UndoRedoAction("Импорт ресурса " + changedEntry.Name,
+                                () => this.ApplyRcfEntryHistorySnapshot(changedEntry, originalRcfEntryData),
+                                () => this.ApplyRcfEntryHistorySnapshot(changedEntry, changedRcfEntryData), changedEntry));
+                        }
+                        this.ShowLocalizedMessageBoxById(this, "message.replace.rcf.success",
+                            "Данные заменены внутри RCF в памяти. Нажмите «Сохранить», чтобы записать архив на диск.",
+                            "caption.rcf", "RCF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    else
+                    {
+                        byte[] changedP3DSnapshot = this.SerializeCurrentP3DForHistory();
+                        if (originalP3DSnapshot != null && changedP3DSnapshot != null)
+                        {
+                            this.ClearUndoRedoHistory();
+                            this.PushUndoRedoAction(new UndoRedoAction("Импорт ресурса " + node.ToString(),
+                                () => this.RestoreStandaloneP3DHistorySnapshot(originalP3DSnapshot),
+                                () => this.RestoreStandaloneP3DHistorySnapshot(changedP3DSnapshot)));
+                        }
+                        this.ShowLocalizedMessageBoxById(this, "message.replace.p3d.success",
+                            "Данные успешно заменены! Не забудьте сохранить P3D файл.", "caption.import", "Импорт",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Ошибка замены: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    this.ShowLocalizedMessageBoxById(this, "message.replace.failed", "Ошибка замены: {0}",
+                        "caption.error", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
                 }
             }
         }
 
+        private void ApplyRcfEntryHistorySnapshot(RcfArchiveItem item, byte[] data)
+        {
+            if (item == null || item.Entry == null) throw new InvalidOperationException("Запись RCF больше недоступна.");
+            item.Entry.Data = data == null ? null : (byte[])data.Clone();
+            item.Entry.Size = (uint)item.Entry.DataLength;
+            item.ParseAttempted = false;
+            item.ParsedFile = null;
+            item.ParseError = null;
+            item.ParsedFileModified = false;
+            item.AnimationSourceFile = null;
+            item.AnimationSourceDataRevision = -1;
+            item.AnimationCatalogScannedRevision = -1;
+            this._rcfAnimationItemsScanComplete = false;
+            if (item.AnimationLoaders != null) item.AnimationLoaders.Clear();
+            item.EmbeddedP3DRootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            item.TextureScanAttempted = false;
+            item.TextureHits = null;
+            item.TextureScanError = null;
+            if (ReferenceEquals(this._activeRcfItem, item))
+            {
+                this.ClearNodePreview();
+                this._file = null;
+                this.propGrid.SelectedObject = item;
+            }
+            // This snapshot re-parses the entry and invalidates prior BaseNode references.
+            this.ClearUndoRedoHistory();
+            this._rcfHasUnsavedChanges = true;
+            this.RefreshRcfTree(item);
+            this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " [RCF] *";
+            this.UpdateMainToolbarState();
+        }
+
+        private byte[] SerializeCurrentP3DForHistory()
+        {
+            if (this._file == null) return null;
+            try
+            {
+                using (MemoryStream snapshot = new MemoryStream())
+                {
+                    this._file.Serialize(snapshot, Endian.Little);
+                    return snapshot.ToArray();
+                }
+            }
+            catch
+            {
+                // Do not block an otherwise valid import just because this file contains a
+                // node that cannot currently be serialized into an undo snapshot.
+                return null;
+            }
+        }
+
+        private void RestoreStandaloneP3DHistorySnapshot(byte[] snapshot)
+        {
+            if (snapshot == null) throw new InvalidOperationException("Снимок документа недоступен.");
+            Pure3DFile restored = new Pure3DFile { GamePicked = PrototypeGame.Any };
+            using (MemoryStream stream = new MemoryStream(snapshot, false))
+                restored.Deserialize(stream, Endian.Little);
+            // Re-deserializing the document creates a new node graph. Drop history entries
+            // which might still hold references to nodes from the previous graph.
+            this.ClearUndoRedoHistory();
+            this.ClearNodePreview();
+            this.propGrid.SelectedObject = null;
+            this._file = restored;
+            this._activeRcfItem = null;
+            this.CacheNodesMetadata();
+            this.RefreshTree();
+            this._fileHasUnsavedChanges = true;
+            if (!string.IsNullOrEmpty(this._currentFilePath))
+                this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " *";
+            this.UpdateMainToolbarState();
+        }
+
+        private bool CanReplaceTreeNode(TreeNode selected)
+        {
+            if (selected == null || selected.Tag == null) return false;
+
+            RcfArchiveItem entry = selected.Tag as RcfArchiveItem;
+            if (entry != null) return entry.Entry != null && entry.Entry.HasData;
+
+            RcfTextureSearchHit hit = selected.Tag as RcfTextureSearchHit;
+            if (hit != null) return hit.Item != null;
+
+            BaseNode node = selected.Tag as BaseNode;
+            return node != null && node.Importable;
+        }
+
+        /// <summary>
+        /// Keeps toolbar commands actionable only when the current document and selection
+        /// support their operation. The menu and context-menu entry points use the same rules.
+        /// </summary>
+        private void UpdateMainToolbarState()
+        {
+            bool hasDocument = this._file != null || this._rcfFile != null;
+            bool hasP3D = this._file != null && this._file.Nodes != null;
+            if (this.saveMenuItem != null) this.saveMenuItem.Enabled = hasDocument;
+            if (this.saveAsMenuItem != null) this.saveAsMenuItem.Enabled = hasDocument;
+            if (this.addFilesMenuItem != null) this.addFilesMenuItem.Enabled = hasDocument;
+            if (this.exportAllTexturesMenuItem != null) this.exportAllTexturesMenuItem.Enabled = hasP3D;
+            if (this.dumpAllP3DMenuItem != null) this.dumpAllP3DMenuItem.Enabled = hasP3D;
+
+            if (this.quickOpenButton != null) this.quickOpenButton.Enabled = true;
+            if (this.quickSaveButton != null) this.quickSaveButton.Enabled = hasDocument;
+            if (this.quickUnpackRcfButton != null) this.quickUnpackRcfButton.Enabled = true;
+            List<TreeNode> selected = this.GetSelectedTreeNodesForExport();
+            if (this.quickExportButton != null)
+            {
+                this.quickExportButton.Enabled = selected.Count > 0 && selected.Any(IsTreeNodeExportCandidate);
+                if (selected.Count > 1)
+                {
+                    string format = UiLocalization.TranslateId("cmd.toolbar.exportSelected.multiple", "📤 Экспорт выделенного ({0})", this._uiLanguage);
+                    this.quickExportButton.Text = string.Format(format, selected.Count);
+                }
+                else
+                {
+                    this.quickExportButton.Text = UiLocalization.TranslateId("cmd.toolbar.exportSelected", "📤 Экспорт выделенного", this._uiLanguage);
+                }
+            }
+            if (this.exportRawChunksMenuItem != null)
+                this.exportRawChunksMenuItem.Enabled = selected.Count > 0 && selected.All(this.CanAttemptRawChunkExport);
+            this.UpdateUndoRedoMenuState();
+        }
+
+        // This is deliberately a cheap structural eligibility check. Exact node resolution is
+        // performed when the command runs; checking command state must not parse RCF entries on
+        // every tree selection change.
+        private bool CanAttemptRawChunkExport(TreeNode selectedTreeNode)
+        {
+            if (selectedTreeNode == null || selectedTreeNode.Tag == null) return false;
+            if (selectedTreeNode.Tag is BaseNode)
+                return this._file != null || this.FindRcfEntryAncestor(selectedTreeNode) != null;
+
+            RcfTextureSearchHit hit = selectedTreeNode.Tag as RcfTextureSearchHit;
+            return hit != null && hit.Item != null && hit.Item.Entry != null && hit.Item.Entry.HasData;
+        }
+
+        private void UpdateTreeContextMenuState()
+        {
+            List<TreeNode> selectedNodes = this.GetSelectedTreeNodesForExport();
+            bool hasSelection = selectedNodes.Count > 0;
+            bool singleSelection = selectedNodes.Count == 1;
+
+            if (this.exportSelectedMenuItem != null)
+            {
+                if (selectedNodes.Count > 1)
+                {
+                    string format = UiLocalization.TranslateId("context.exportSelected.multiple", "📤 Экспортировать выбранные элементы ({0})...", this._uiLanguage);
+                    this.exportSelectedMenuItem.Text = string.Format(format, selectedNodes.Count);
+                }
+                else
+                {
+                    this.exportSelectedMenuItem.Text = UiLocalization.TranslateId("context.exportSelected", "📤 Экспортировать этот элемент...", this._uiLanguage);
+                }
+                this.exportSelectedMenuItem.Enabled = hasSelection && selectedNodes.Any(IsTreeNodeExportCandidate);
+            }
+
+            bool canOpen = false;
+            bool canReplace = false;
+            if (singleSelection)
+            {
+                TreeNode selected = selectedNodes[0];
+                RcfArchiveItem entry = selected.Tag as RcfArchiveItem;
+                RcfTextureSearchHit hit = selected.Tag as RcfTextureSearchHit;
+                BaseNode node = selected.Tag as BaseNode;
+                if (entry != null)
+                {
+                    canOpen = entry.Entry != null && entry.Entry.HasData && entry.Entry.DataLength > 0;
+                }
+                else if (hit != null)
+                {
+                    canOpen = hit.Item != null && hit.Item.Entry != null && hit.Item.Entry.HasData;
+                }
+                else if (node != null)
+                {
+                    canOpen = node.Exportable && !string.IsNullOrWhiteSpace(node.ExportExtension);
+                }
+                canReplace = this.CanReplaceTreeNode(selected);
+            }
+
+            bool canRawChunkExport = hasSelection && selectedNodes.All(n => this.CanResolveSelectedP3DNode(n));
+            bool canRawChunkImport = singleSelection && this.CanResolveSelectedP3DNode(selectedNodes[0]);
+            if (this.openExternalMenuItem != null) this.openExternalMenuItem.Enabled = canOpen;
+            if (this.openWithExternalMenuItem != null) this.openWithExternalMenuItem.Enabled = canOpen;
+            if (this.replaceSelectedMenuItem != null) this.replaceSelectedMenuItem.Enabled = canReplace;
+            if (this.exportRawChunkMenuItem != null)
+            {
+                this.exportRawChunkMenuItem.Enabled = canRawChunkExport;
+                if (selectedNodes.Count > 1)
+                {
+                    string format = UiLocalization.TranslateId("context.exportRawChunk.multiple", "Экспортировать сырые P3D-чанки выделенных элементов ({0})...", this._uiLanguage);
+                    this.exportRawChunkMenuItem.Text = string.Format(format, selectedNodes.Count);
+                }
+                else
+                {
+                    this.exportRawChunkMenuItem.Text = UiLocalization.TranslateId("context.exportRawChunk", "Экспортировать сырой P3D-чанк...", this._uiLanguage);
+                }
+            }
+            if (this.importRawChunkMenuItem != null) this.importRawChunkMenuItem.Enabled = canRawChunkImport;
+        }
+
+        private static bool IsTreeNodeExportCandidate(TreeNode treeNode)
+        {
+            if (treeNode == null || treeNode.Tag == null || treeNode.Tag is RcfFolderItem) return false;
+            RcfArchiveItem archiveItem = treeNode.Tag as RcfArchiveItem;
+            if (archiveItem != null) return archiveItem.Entry != null && archiveItem.Entry.HasData;
+            RcfTextureSearchHit hit = treeNode.Tag as RcfTextureSearchHit;
+            if (hit != null) return hit.Item != null;
+            return treeNode.Tag is BaseNode;
+        }
+
+        private void OpenSelectedExternally(bool chooseProgram)
+        {
+            ExternalTargetDescriptor target;
+            string error;
+            if (!this.TryDescribeSelectedExternalTarget(out target, out error))
+            {
+                this.ShowLocalizedMessageBoxText(this, error ?? UiLocalization.TranslateId("message.external.unsupportedSelection",
+                    "Выбранный элемент нельзя открыть во внешней программе.", this._uiLanguage), "caption.external", "Внешние файлы",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string workingPath = null;
+            ExternalOpenSession session = null;
+            bool createdNewSession = false;
+            try
+            {
+                session = this._externalOpenSessions.FirstOrDefault(existing => existing.Matches(target));
+                if (session != null && File.Exists(session.FilePath))
+                {
+                    workingPath = session.FilePath;
+                }
+                else
+                {
+                    if (session != null)
+                    {
+                        session.Dispose();
+                        this._externalOpenSessions.Remove(session);
+                        session = null;
+                    }
+                    string workspaceRoot = this.GetExternalWorkspaceRoot(target.SourceDocumentPath);
+                    string relativePath = target.RelativePath;
+                    workingPath = GetUniqueExternalWorkingPath(workspaceRoot, relativePath, this._externalOpenSessions);
+                    string directory = Path.GetDirectoryName(workingPath);
+                    if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+                    this.ExportExternalTarget(target, workingPath);
+
+                    if (target.CanImport)
+                    {
+                        session = new ExternalOpenSession(this, target, workspaceRoot, workingPath);
+                        this._externalOpenSessions.Add(session);
+                        createdNewSession = true;
+                    }
+                }
+
+                if (chooseProgram)
+                {
+                    // Use the operating system's own Open With dialog rather than asking
+                    // the user to locate an executable in a normal file picker.
+                    var openAsInfo = new OpenAsInfo
+                    {
+                        FilePath = workingPath,
+                        ClassName = null, // Let Windows infer the file type from the extension.
+                        Flags = OAIF_ALLOW_REGISTRATION | OAIF_EXEC
+                    };
+                    int hresult = SHOpenWithDialog(this.Handle, ref openAsInfo);
+                    if (hresult != 0)
+                    {
+                        // Closing the dialog is a normal cancellation, not an open failure.
+                        if (hresult == HRESULT_CANCELLED || hresult == 1)
+                        {
+                            if (createdNewSession && session != null)
+                            {
+                                session.Dispose();
+                                this._externalOpenSessions.Remove(session);
+                            }
+                            return;
+                        }
+                        Marshal.ThrowExceptionForHR(hresult);
+                    }
+                }
+                else
+                {
+                    var startInfo = new ProcessStartInfo { FileName = workingPath, UseShellExecute = true, Verb = "open" };
+                    Process.Start(startInfo);
+                }
+
+                if (!target.CanImport)
+                    this.ShowLocalizedMessageBoxById(this, "message.external.noReverseImport",
+                        "Элемент экспортирован и открыт во внешней программе, но его формат не поддерживает обратный импорт. Изменения внешнего файла не попадут в документ.",
+                        "caption.external", "Внешние файлы", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                if (createdNewSession && session != null && this._externalOpenSessions.Contains(session))
+                {
+                    session.Dispose();
+                    this._externalOpenSessions.Remove(session);
+                }
+                this.ShowLocalizedMessageBoxById(this, "message.external.openFailed", "Не удалось открыть внешний файл: {0}",
+                    "caption.external", "Внешние файлы", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+            }
+        }
+
+        private bool TryDescribeSelectedExternalTarget(out ExternalTargetDescriptor target, out string error)
+        {
+            target = null;
+            error = null;
+            List<TreeNode> selectedNodes = this.GetSelectedTreeNodesForExport();
+            if (selectedNodes.Count != 1)
+            {
+                error = selectedNodes.Count == 0
+                    ? UiLocalization.TranslateId("message.external.selectOneFirst", "Сначала выберите файл или экспортируемый элемент в дереве.", this._uiLanguage)
+                    : UiLocalization.TranslateId("message.external.oneItemOnly", "Открытие во внешней программе выполняется для одного элемента. Выберите один элемент.", this._uiLanguage);
+                return false;
+            }
+            TreeNode selected = selectedNodes[0];
+
+            RcfArchiveItem archiveItem = selected.Tag as RcfArchiveItem;
+            if (archiveItem != null)
+            {
+                if (archiveItem.Entry == null || !archiveItem.Entry.HasData) { error = UiLocalization.TranslateId("message.external.entryDataMissing", "У выбранной записи нет данных.", this._uiLanguage); return false; }
+                string displayPath = archiveItem.Name;
+                bool compressed = Utils.IsRZFile(displayPath);
+                if (compressed && displayPath.EndsWith(".p3d.rz", StringComparison.OrdinalIgnoreCase))
+                    displayPath = displayPath.Substring(0, displayPath.Length - 3);
+                target = new ExternalTargetDescriptor
+                {
+                    Archive = archiveItem.Owner,
+                    ArchiveItem = archiveItem,
+                    IsWholeArchiveEntry = true,
+                    StoredAsRz = compressed,
+                    SourceDocumentPath = this._currentFilePath,
+                    RelativePath = displayPath,
+                    CanImport = true,
+                    DisplayName = archiveItem.Name
+                };
+                return true;
+            }
+
+            RcfTextureSearchHit textureHit = selected.Tag as RcfTextureSearchHit;
+            BaseNode node = selected.Tag as BaseNode;
+            if (textureHit != null)
+            {
+                archiveItem = textureHit.Item;
+                if (archiveItem == null || !this.EnsureRcfEntryParsed(archiveItem) || archiveItem.ParsedFile == null)
+                {
+                    error = UiLocalization.TranslateId("message.external.textureContainerParseFailed", "Не удалось разобрать P3D, содержащий выбранную текстуру.", this._uiLanguage);
+                    return false;
+                }
+                node = ResolveRcfTextureHit(archiveItem.ParsedFile, textureHit.PathIndices);
+            }
+            else if (node != null)
+            {
+                archiveItem = this.FindRcfEntryAncestor(selected);
+                if (archiveItem != null && (!this.EnsureRcfEntryParsed(archiveItem) || archiveItem.ParsedFile == null))
+                {
+                    error = UiLocalization.TranslateId("message.external.itemContainerParseFailed", "Не удалось разобрать P3D, содержащий выбранный элемент.", this._uiLanguage);
+                    return false;
+                }
+            }
+
+            if (node == null) { error = UiLocalization.TranslateId("message.external.selectExportableNotFolder", "Выберите файл или поддерживающий экспорт элемент, а не папку.", this._uiLanguage); return false; }
+            if (!node.Exportable || string.IsNullOrWhiteSpace(node.ExportExtension))
+            {
+                error = UiLocalization.TranslateId("message.external.typeNotExportable", "Этот тип секции пока нельзя экспортировать во внешний файл.", this._uiLanguage);
+                return false;
+            }
+
+            bool inRcf = archiveItem != null;
+            string relativeNodeName = GetSafeFileName(node);
+            target = new ExternalTargetDescriptor
+            {
+                Archive = inRcf ? archiveItem.Owner : null,
+                ArchiveItem = archiveItem,
+                Node = node,
+                IsWholeArchiveEntry = false,
+                StoredAsRz = inRcf && Utils.IsRZFile(archiveItem.Name),
+                StandaloneFile = inRcf ? null : this._file,
+                SourceDocumentPath = this._currentFilePath,
+                RelativePath = relativeNodeName,
+                CanImport = node.Importable,
+                DisplayName = node.ToString()
+            };
+            return true;
+        }
+
+        private string GetExternalWorkspaceRoot(string sourceDocumentPath)
+        {
+            string sourceDir = Path.GetDirectoryName(Path.GetFullPath(sourceDocumentPath ?? this._currentFilePath ?? AppDomain.CurrentDomain.BaseDirectory));
+            string documentName = Path.GetFileName(sourceDocumentPath ?? this._currentFilePath ?? "document.p3d");
+            string safeDocument = SanitizeExternalPathSegment(documentName);
+            return Path.Combine(sourceDir, ".PrototypeUltimateTool_Working", safeDocument);
+        }
+
+        private static string GetUniqueExternalWorkingPath(string root, string relativePath, List<ExternalOpenSession> sessions)
+        {
+            string[] segments = SplitArchivePath(relativePath);
+            if (segments.Length == 0) segments = new[] { "export.bin" };
+            for (int i = 0; i < segments.Length; i++) segments[i] = SanitizeExternalPathSegment(segments[i]);
+            string candidate = Path.GetFullPath(Path.Combine(new[] { root }.Concat(segments).ToArray()));
+            string fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!candidate.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Безопасный путь рабочей копии выходит за пределы временной папки.");
+
+            int suffix = 2;
+            while (File.Exists(candidate) || (sessions != null && sessions.Any(session => SamePath(session.FilePath, candidate))))
+            {
+                string dir = Path.GetDirectoryName(candidate);
+                string name = Path.GetFileNameWithoutExtension(candidate);
+                string extension = Path.GetExtension(candidate);
+                candidate = Path.Combine(dir, name + " (" + suffix++ + ")" + extension);
+            }
+            return candidate;
+        }
+
+        private static string SanitizeExternalPathSegment(string value)
+        {
+            string result = CleanRcfName(value ?? string.Empty);
+            char[] invalid = Path.GetInvalidFileNameChars().Concat(new[] { '<', '>', ':', '"', '/', '\\', '|', '?', '*' }).Distinct().ToArray();
+            foreach (char c in invalid) result = result.Replace(c, '_');
+            result = result.Trim().TrimEnd('.');
+            if (result == "." || result == "..") result = "_";
+            if (string.IsNullOrWhiteSpace(result)) result = "unnamed";
+            string stem = result.Split('.')[0];
+            if (new[] { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" }.Contains(stem, StringComparer.OrdinalIgnoreCase))
+                result = "_" + result;
+            return result;
+        }
+
+        private static string QuoteProcessArgument(string value)
+        {
+            // Paths passed through CreateProcess are quoted as a single command-line
+            // argument. Do not double ordinary backslashes: that changes Windows paths.
+            return "\"" + (value ?? string.Empty).Replace("\"", "\\\"") + "\"";
+        }
+
+        private void ExportExternalTarget(ExternalTargetDescriptor target, string workingPath)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            if (target.IsWholeArchiveEntry)
+            {
+                byte[] data = target.ArchiveItem.Entry.Data;
+                if (target.StoredAsRz)
+                {
+                    using (var source = new MemoryStream(data, false))
+                    using (var output = File.Create(workingPath)) Utils.DecompressRZ(source, output);
+                }
+                else File.WriteAllBytes(workingPath, data);
+                return;
+            }
+            using (FileStream output = File.Create(workingPath)) target.Node.Export(output);
+        }
+
+        private void HandleExternalFileChanged(ExternalOpenSession session)
+        {
+            if (session == null || session.IsDisposed || !this._externalOpenSessions.Contains(session)) return;
+            bool retryAfterReadFailure = false;
+            try
+            {
+                if (!File.Exists(session.FilePath)) return;
+                ExternalTargetDescriptor target = session.Target;
+                if (target.IsWholeArchiveEntry)
+                {
+                    byte[] replacement = File.ReadAllBytes(session.FilePath);
+                    if (target.StoredAsRz)
+                    {
+                        using (var raw = new MemoryStream(replacement, false))
+                        using (Stream compressed = Utils.CompressRZ(raw))
+                        using (var packed = new MemoryStream())
+                        {
+                            compressed.CopyTo(packed);
+                            replacement = packed.ToArray();
+                        }
+                    }
+                    // The external import can replace/reparse this resource graph; discard
+                    // undo actions referring to the previous in-memory model before mutation.
+                    this.ClearUndoRedoHistory();
+                    target.ArchiveItem.Entry.Data = replacement;
+                    target.ArchiveItem.Entry.Size = (uint)replacement.Length;
+                    target.ArchiveItem.ParsedFile = null;
+                    target.ArchiveItem.ParseAttempted = false;
+                    target.ArchiveItem.ParsedFileModified = false;
+                    target.ArchiveItem.ParseError = null;
+                    InvalidateRcfEntryCaches(target.ArchiveItem);
+                    if (ReferenceEquals(this._rcfFile, target.Archive))
+                    {
+                        this._rcfHasUnsavedChanges = true;
+                        this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " [RCF] *";
+                        this.RefreshRcfTree(target.ArchiveItem);
+                    }
+                }
+                else
+                {
+                    using (FileStream input = new FileStream(session.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        this.ClearUndoRedoHistory();
+                        target.Node.Import(input);
+                    }
+
+                    if (target.ArchiveItem != null)
+                    {
+                        target.ArchiveItem.ParsedFileModified = true;
+                        this.InvalidateRcfEntryCaches(target.ArchiveItem);
+                        this.SerializeRcfItem(target.ArchiveItem);
+                    }
+                    else if (target.StandaloneFile != null && ReferenceEquals(this._file, target.StandaloneFile))
+                    {
+                        this._fileHasUnsavedChanges = true;
+                        this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " *";
+                        this.CacheNodesMetadata();
+                    }
+
+                    if (ReferenceEquals(this.propGrid.SelectedObject, target.Node)) this.ReloadPreview();
+                }
+            }
+            catch (IOException ex)
+            {
+                // Many editors save via a temporary file and briefly lock the destination.
+                // Retry quietly instead of losing the update or interrupting the workflow.
+                retryAfterReadFailure = session.RetryAfterReadFailure();
+                if (!retryAfterReadFailure && !this.IsDisposed && this.IsHandleCreated)
+                    this.ShowLocalizedMessageBoxById(this, "message.external.readWorkingCopyFailed",
+                        "Не удалось прочитать рабочую копию после нескольких попыток: {0}\nФайл сохранён во временной папке; повторите сохранение во внешней программе.",
+                        "caption.external", "Внешние файлы", MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                // Do not record an invalid/partially-written version as processed. Some editors
+                // replace files in multiple steps, so retry against the same working copy first.
+                retryAfterReadFailure = session.RetryAfterReadFailure();
+                if (!retryAfterReadFailure && !this.IsDisposed && this.IsHandleCreated)
+                    this.ShowLocalizedMessageBoxById(this, "message.external.importFailed",
+                        "Изменения внешнего файла не удалось импортировать после повторных попыток: {0}\nРабочая копия сохранена. Проверьте формат файла и сохраните его повторно.",
+                        "caption.external", "Внешние файлы", MessageBoxButtons.OK, MessageBoxIcon.Warning, ex.Message);
+            }
+            finally
+            {
+                if (!retryAfterReadFailure) session.MarkCurrentStateProcessed();
+            }
+        }
+
+        private void InvalidateRcfEntryCaches(RcfArchiveItem item)
+        {
+            if (item == null) return;
+            // Entry.Data may have changed while the old closures still capture its snapshot.
+            item.AnimationSourceFile = null;
+            item.AnimationSourceDataRevision = -1;
+            item.AnimationCatalogScannedRevision = -1;
+            this._rcfAnimationItemsScanComplete = false;
+            if (item.AnimationLoaders != null) item.AnimationLoaders.Clear();
+            item.EmbeddedP3DRootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            item.TextureScanAttempted = false;
+            item.TextureHits = null;
+            item.TextureScanError = null;
+            if (item.Entry != null) item.Entry.Size = (uint)item.Entry.DataLength;
+            if (ReferenceEquals(item, this._activeRcfItem) && item.ParsedFileModified)
+                this.SerializeRcfItem(item);
+            string cachePath = this.GetRcfTextureIndexCachePath();
+            if (ReferenceEquals(item.Owner, this._rcfFile) && !string.IsNullOrEmpty(cachePath))
+            {
+                try { if (File.Exists(cachePath)) File.Delete(cachePath); } catch { }
+            }
+        }
+
+        private void SerializeRcfItem(RcfArchiveItem item)
+        {
+            if (item == null || item.Entry == null || item.ParsedFile == null || !item.ParsedFileModified) return;
+            using (var serialized = new MemoryStream())
+            {
+                item.ParsedFile.Serialize(serialized, item.ParsedFile.Endian);
+                serialized.Position = 0;
+                if (Utils.IsRZFile(item.Name))
+                {
+                    using (Stream compressed = Utils.CompressRZ(serialized))
+                    using (var packed = new MemoryStream())
+                    {
+                        compressed.CopyTo(packed);
+                        item.Entry.Data = packed.ToArray();
+                    }
+                }
+                else item.Entry.Data = serialized.ToArray();
+            }
+            item.Entry.Size = (uint)item.Entry.DataLength;
+            item.AnimationSourceFile = null;
+            item.AnimationSourceDataRevision = -1;
+            item.AnimationCatalogScannedRevision = -1;
+            this._rcfAnimationItemsScanComplete = false;
+            if (item.AnimationLoaders != null) item.AnimationLoaders.Clear();
+            item.EmbeddedP3DRootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            item.ParsedFileModified = false;
+            if (ReferenceEquals(item.Owner, this._rcfFile))
+            {
+                this._rcfHasUnsavedChanges = true;
+                this.Text = "Prototype Ultimate Tool - " + Path.GetFileName(this._currentFilePath) + " [RCF] *";
+            }
+        }
+
+        private bool PrepareToSwitchDocument(string newPath)
+        {
+            bool stopTracking = false;
+            if (this._externalOpenSessions.Count > 0)
+            {
+                DialogResult stopResult = this.ShowLocalizedMessageBoxByIdWithDefaultButton(this, "message.external.stopTrackingPrompt",
+                    "За изменениями файлов, открытых во внешних программах, сейчас ведётся наблюдение.\n\nЕсли открыть другой документ, наблюдение за текущими рабочими копиями будет остановлено. Убедитесь, что последние изменения уже импортированы.\n\nПродолжить?",
+                    "caption.external", "Внешние файлы", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                if (stopResult != DialogResult.Yes) return false;
+                stopTracking = true;
+            }
+
+            if (this._rcfHasUnsavedChanges || this._fileHasUnsavedChanges)
+            {
+                DialogResult saveResult = this.ShowLocalizedMessageBoxByIdWithDefaultButton(this, "message.document.unsavedBeforeOpen",
+                    "В текущем документе есть изменения. Сохранить их перед открытием другого файла?",
+                    "caption.unsavedChanges", "Несохранённые изменения", MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
+                if (saveResult == DialogResult.Cancel) return false;
+                if (saveResult == DialogResult.Yes)
+                {
+                    this.OnSaveFile(false);
+                    if (this._rcfHasUnsavedChanges || this._fileHasUnsavedChanges) return false;
+                }
+            }
+
+            if (stopTracking) this.StopExternalOpenSessions();
+            return true;
+        }
+
+        private void StopExternalOpenSessions()
+        {
+            foreach (ExternalOpenSession session in this._externalOpenSessions.ToArray()) session.Dispose();
+            this._externalOpenSessions.Clear();
+        }
+
+        private static bool SamePath(string first, string second)
+        {
+            if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(second)) return false;
+            try { return string.Equals(Path.GetFullPath(first).TrimEnd(Path.DirectorySeparatorChar),
+                Path.GetFullPath(second).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase); }
+            catch { return string.Equals(first, second, StringComparison.OrdinalIgnoreCase); }
+        }
+
         private void OnUnpackRcf()
         {
-            using (OpenFileDialog ofd = new OpenFileDialog { Filter = "RCF Files (*.rcf)|*.rcf" })
+            using (OpenFileDialog ofd = new OpenFileDialog
+            {
+                Title = UiLocalization.TranslateId("dialog.unpackRcf.source.title", "Выберите RCF-архив", this._uiLanguage),
+                Filter = UiLocalization.TranslateId("filter.rcfOnly", "Архивы RCF (*.rcf)|*.rcf", this._uiLanguage)
+            })
             {
                 if (ofd.ShowDialog(this) != DialogResult.OK) return;
-                using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog { Title = "Куда распаковать архив?" })
+                using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog { Title = UiLocalization.TranslateId("dialog.unpackRcf.folder.title", "Выберите папку для распаковки RCF-архива", this._uiLanguage) })
                 {
                     if (mfbd.ShowDialog(this) != DialogResult.OK) return;
-                    using (FileStream fs = File.OpenRead(ofd.FileName)) new CementFile(fs).Unpack(mfbd.SelectedPath);
-                    MessageBox.Show("Архив RCF успешно распакован!", "RCF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    try
+                    {
+                        using (FileStream fs = File.OpenRead(ofd.FileName)) new CementFile(fs, true).Unpack(mfbd.SelectedPath);
+                        this.ShowLocalizedMessageBoxById(this, "message.rcf.unpack.success", "Архив RCF успешно распакован!",
+                            "caption.rcf", "RCF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteApplicationLog("UNPACK_RCF_ERROR", "Ошибка распаковки RCF: " + ofd.FileName, ex);
+                        this.ShowLocalizedMessageBoxById(this, "message.rcf.unpack.failed", "Не удалось распаковать RCF-архив: {0}",
+                            "caption.error", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+                    }
                 }
             }
         }
 
         private void OnPackRcf()
         {
-            using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog { Title = "Выберите папку для сборки в RCF" })
+            using (ModernFolderBrowserDialog mfbd = new ModernFolderBrowserDialog { Title = UiLocalization.TranslateId("dialog.packRcf.folder.title", "Выберите папку для сборки RCF-архива", this._uiLanguage) })
             {
                 if (mfbd.ShowDialog(this) != DialogResult.OK) return;
-                using (SaveFileDialog sfd = new SaveFileDialog { Filter = "RCF Files (*.rcf)|*.rcf" })
+                using (SaveFileDialog sfd = new SaveFileDialog
+                {
+                    Title = UiLocalization.TranslateId("dialog.packRcf.output.title", "Сохранить RCF-архив", this._uiLanguage),
+                    Filter = UiLocalization.TranslateId("filter.rcfOnly", "Архивы RCF (*.rcf)|*.rcf", this._uiLanguage)
+                })
                 {
                     if (sfd.ShowDialog(this) != DialogResult.OK) return;
-                    CementFile cement = new CementFile { Endian = Endian.Little, MajorVersion = 2, MinorVersion = 1 };
-                    cement.Pack(mfbd.SelectedPath);
-                    using (FileStream fs = File.Create(sfd.FileName)) cement.Serialize(fs);
-                    MessageBox.Show("Архив RCF успешно собран!", "RCF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    try
+                    {
+                        CementFile cement = new CementFile { Endian = Endian.Little, MajorVersion = 2, MinorVersion = 1 };
+                        cement.Pack(mfbd.SelectedPath);
+                        using (FileStream fs = File.Create(sfd.FileName)) cement.Serialize(fs);
+                        this.ShowLocalizedMessageBoxById(this, "message.rcf.pack.success", "Архив RCF успешно собран!",
+                            "caption.rcf", "RCF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteApplicationLog("PACK_RCF_ERROR", "Ошибка сборки RCF из папки: " + mfbd.SelectedPath, ex);
+                        this.ShowLocalizedMessageBoxById(this, "message.rcf.pack.failed", "Не удалось собрать RCF-архив: {0}",
+                            "caption.error", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error, ex.Message);
+                    }
                 }
             }
         }
@@ -1018,15 +9853,6 @@ namespace PrototypeUltimateTool
             }
         }
 
-        private static void CollectPrimitiveGroupsRecursively(BaseNode node, List<PrimitiveGroup> list)
-        {
-            if (node == null) return;
-            if (node is PrimitiveGroup pg) { list.Add(pg); return; }
-            if (node.Children != null)
-            {
-                foreach (var c in node.Children) CollectPrimitiveGroupsRecursively(c, list);
-            }
-        }
 
         private static string GetSafeFileName(BaseNode node)
         {
@@ -1049,6 +9875,734 @@ namespace PrototypeUltimateTool
         }
 
         private static string GetCleanName(BaseNode node) => GetSortNameStatic(node);
+
+        private sealed class RcfFolderItem
+        {
+            public string Name { get; private set; }
+            public string Path { get; private set; }
+            public RcfFolderItem(string name, string path) { Name = name; Path = path; }
+            public override string ToString() => Path;
+        }
+
+        private sealed class RcfTextureCacheItem
+        {
+            public bool Attempted { get; private set; }
+            public string Error { get; private set; }
+            public List<RcfTextureHitInfo> Hits { get; private set; }
+            public RcfTextureCacheItem(bool attempted, string error, List<RcfTextureHitInfo> hits)
+            {
+                Attempted = attempted;
+                Error = error;
+                Hits = hits ?? new List<RcfTextureHitInfo>();
+            }
+        }
+
+        private sealed class RcfTreeItemSnapshot
+        {
+            public int TreeId;
+            public RcfArchiveItem Item;
+            public string Name;
+            public long Size;
+            public string Extension;
+            public string Format;
+            public bool CanContainP3D;
+            public bool ParseAttempted;
+            public bool HasParsedFile;
+            public HashSet<string> RootTypes;
+            public List<RcfTreeRootSnapshot> ParsedRoots;
+        }
+
+        private sealed class RcfTreeRootSnapshot
+        {
+            public int RootIndex;
+            public BaseNode Node;
+            public string TypeName;
+            public string Text;
+            public string ImageKey;
+            public bool HasChildren;
+        }
+
+        private sealed class RcfTreeNodeSpec
+        {
+            public string Key;
+            public string ParentKey;
+            public string Text;
+            public string ImageKey;
+            public string ToolTipText;
+            public string LocalizationKey;
+            public object Tag;
+            public bool IsArchiveFile;
+            public long Size;
+        }
+
+        private sealed class RcfTreeBuildResult
+        {
+            public List<RcfTreeNodeSpec> Nodes;
+        }
+
+        private sealed class RcfTreeBuildSession
+        {
+            public int Generation;
+            public List<RcfTreeNodeSpec> Specs;
+            public int NextSpecIndex;
+            public HashSet<string> PreviouslyExpandedFolders;
+            public HashSet<string> PreviouslyExpandedP3DEntries;
+            public object[] PreviouslySelectedTags;
+            public object PreviouslyActiveTag;
+            public RcfArchiveItem SelectItem;
+            public bool SmartExpansionPending;
+            public Dictionary<string, TreeNode> FolderNodes;
+            public Dictionary<string, TreeNode> NodesByKey;
+            public Dictionary<RcfArchiveItem, TreeNode> TreeNodesByItem;
+            public List<TreeNode> AllNodes;
+        }
+
+        private sealed class RcfEntryParseResult
+        {
+            public Pure3DFile File { get; private set; }
+            public string Error { get; private set; }
+            public long EntryRevision { get; private set; }
+            public long PackedBytes { get; private set; }
+            public long DecodedBytes { get; private set; }
+            public int RootChunkCount { get; private set; }
+            public bool UsedParallel { get; private set; }
+            public int WorkerCount { get; private set; }
+            public double DecompressMilliseconds { get; private set; }
+            public double ParseMilliseconds { get; private set; }
+            public double ElapsedMilliseconds { get; private set; }
+
+            public RcfEntryParseResult(Pure3DFile file, string error, long entryRevision, long packedBytes,
+                long decodedBytes, int rootChunkCount, bool usedParallel, int workerCount,
+                double decompressMilliseconds, double parseMilliseconds, double elapsedMilliseconds)
+            {
+                File = file;
+                Error = error;
+                EntryRevision = entryRevision;
+                PackedBytes = packedBytes;
+                DecodedBytes = decodedBytes;
+                RootChunkCount = rootChunkCount;
+                UsedParallel = usedParallel;
+                WorkerCount = workerCount;
+                DecompressMilliseconds = decompressMilliseconds;
+                ParseMilliseconds = parseMilliseconds;
+                ElapsedMilliseconds = elapsedMilliseconds;
+            }
+
+            public static RcfEntryParseResult Failed(long revision, string error)
+            {
+                return new RcfEntryParseResult(null, error, revision, 0, 0, 0, false, 1, 0, 0, 0);
+            }
+
+            public static RcfEntryParseResult FromCached(RcfArchiveItem item)
+            {
+                return new RcfEntryParseResult(item != null ? item.ParsedFile : null,
+                    item != null ? item.ParseError : "Ресурс не найден.",
+                    item != null && item.Entry != null ? item.Entry.DataRevision : -1,
+                    item != null && item.Entry != null ? item.Entry.DataLength : 0,
+                    item != null && item.Entry != null ? item.Entry.DataLength : 0,
+                    item != null && item.ParsedFile != null ? item.ParsedFile.Nodes.Count : 0,
+                    false, 1, 0, 0, 0);
+            }
+        }
+
+        private sealed class RcfOpenIndexResult
+        {
+            public CementFile Archive { get; private set; }
+            public List<RcfArchiveItem> Items { get; private set; }
+            public List<RcfTextureCacheItem> TextureCache { get; private set; }
+
+            public RcfOpenIndexResult(CementFile archive, List<RcfArchiveItem> items, List<RcfTextureCacheItem> textureCache)
+            {
+                Archive = archive;
+                Items = items ?? new List<RcfArchiveItem>();
+                TextureCache = textureCache;
+            }
+        }
+
+        private sealed class RcfTextureScanResult
+        {
+            public List<RcfTextureHitInfo> Hits { get; private set; }
+            public string Error { get; private set; }
+
+            public RcfTextureScanResult(List<RcfTextureHitInfo> hits, string error)
+            {
+                Hits = hits ?? new List<RcfTextureHitInfo>();
+                Error = error;
+            }
+        }
+
+        private sealed class RcfTextureHitInfo
+        {
+            public int[] PathIndices { get; private set; }
+            public string DisplayText { get; private set; }
+            public string TypeName { get; private set; }
+            public string SortText { get; private set; }
+            public long PixelCount { get; private set; }
+
+            public RcfTextureHitInfo(int[] pathIndices, string displayText, string typeName, string sortText, long pixelCount = 0)
+            {
+                PathIndices = pathIndices ?? new int[0];
+                DisplayText = displayText ?? string.Empty;
+                TypeName = typeName ?? string.Empty;
+                SortText = sortText ?? string.Empty;
+                PixelCount = pixelCount;
+            }
+        }
+
+        private sealed class RcfTextureSearchHit
+        {
+            public RcfArchiveItem Item { get; private set; }
+            public int[] PathIndices { get; private set; }
+            public string DisplayText { get; private set; }
+            public string TypeName { get; private set; }
+
+            public RcfTextureSearchHit(RcfArchiveItem item, int[] pathIndices, string displayText, string typeName)
+            {
+                Item = item;
+                PathIndices = pathIndices ?? new int[0];
+                DisplayText = displayText ?? string.Empty;
+                TypeName = typeName ?? string.Empty;
+            }
+
+            public override string ToString() => DisplayText;
+        }
+
+        private sealed class ExternalTargetDescriptor
+        {
+            public CementFile Archive;
+            public RcfArchiveItem ArchiveItem;
+            public BaseNode Node;
+            public Pure3DFile StandaloneFile;
+            public bool IsWholeArchiveEntry;
+            public bool StoredAsRz;
+            public bool CanImport;
+            public string SourceDocumentPath;
+            public string RelativePath;
+            public string DisplayName;
+        }
+
+        private sealed class ExternalOpenSession : IDisposable
+        {
+            private readonly MainForm _owner;
+            private readonly FileSystemWatcher _watcher;
+            private readonly System.Threading.Timer _debounceTimer;
+            private readonly System.Threading.Timer _pollTimer;
+            private readonly object _stateLock = new object();
+            private long _lastProcessedLength;
+            private DateTime _lastProcessedWriteUtc;
+            private string _lastProcessedFingerprint;
+            private DateTime _lastFingerprintProbeUtc;
+            private int _checking;
+            private int _polling;
+            private int _uiImportQueued;
+            private int _transientImportFailures;
+            private volatile bool _lastObservedExists;
+            private volatile bool _disposed;
+
+            public ExternalTargetDescriptor Target { get; private set; }
+            public string WorkspaceRoot { get; private set; }
+            public string FilePath { get; private set; }
+            public bool IsDisposed => _disposed;
+
+            public ExternalOpenSession(MainForm owner, ExternalTargetDescriptor target, string workspaceRoot, string filePath)
+            {
+                _owner = owner;
+                Target = target;
+                WorkspaceRoot = workspaceRoot;
+                FilePath = filePath;
+                this.UpdateBaseline();
+                _lastObservedExists = File.Exists(FilePath);
+                _debounceTimer = new System.Threading.Timer(this.OnDebounce, null, Timeout.Infinite, Timeout.Infinite);
+                string directory = Path.GetDirectoryName(filePath);
+                _watcher = new FileSystemWatcher(directory, "*")
+                {
+                    IncludeSubdirectories = false,
+                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
+                    InternalBufferSize = 32 * 1024,
+                    EnableRaisingEvents = false
+                };
+                _watcher.Changed += this.OnFileSystemEvent;
+                _watcher.Created += this.OnFileSystemEvent;
+                _watcher.Deleted += this.OnFileSystemEvent;
+                _watcher.Renamed += this.OnFileRenamed;
+                _watcher.Error += this.OnWatcherError;
+                _watcher.EnableRaisingEvents = true;
+
+                // FileSystemWatcher notifications can be dropped by some editors and during
+                // atomic-save bursts. Poll cheap metadata as a fallback, with an occasional
+                // streaming hash probe for same-size/same-timestamp replacements.
+                _lastFingerprintProbeUtc = DateTime.UtcNow;
+                _pollTimer = new System.Threading.Timer(this.OnPoll, null, 1000, 1000);
+            }
+
+            public bool Matches(ExternalTargetDescriptor target)
+            {
+                if (target == null || Target == null) return false;
+                if (Target.IsWholeArchiveEntry || target.IsWholeArchiveEntry)
+                    return Target.IsWholeArchiveEntry && target.IsWholeArchiveEntry && ReferenceEquals(Target.ArchiveItem, target.ArchiveItem);
+                return ReferenceEquals(Target.Node, target.Node) && ReferenceEquals(Target.ArchiveItem, target.ArchiveItem) &&
+                       ReferenceEquals(Target.StandaloneFile, target.StandaloneFile);
+            }
+
+            private void ScheduleDebouncedCheck(int milliseconds)
+            {
+                if (_disposed) return;
+                try { _debounceTimer.Change(milliseconds, Timeout.Infinite); }
+                catch (ObjectDisposedException) { }
+            }
+
+            private void OnFileSystemEvent(object sender, FileSystemEventArgs e)
+            {
+                if (_disposed || e == null || !MainForm.SamePath(e.FullPath, FilePath)) return;
+                this.ScheduleDebouncedCheck(500);
+            }
+
+            private void OnFileRenamed(object sender, RenamedEventArgs e)
+            {
+                if (_disposed || e == null) return;
+                // Editors often save as temp-file + rename over the destination. Watching '*'
+                // is necessary to see the rename; only the target path schedules an import.
+                if (MainForm.SamePath(e.FullPath, FilePath) || MainForm.SamePath(e.OldFullPath, FilePath))
+                    this.ScheduleDebouncedCheck(500);
+            }
+
+            private void OnWatcherError(object sender, ErrorEventArgs e)
+            {
+                if (_disposed) return;
+                // Re-check after watcher buffer overflow; periodic polling remains active too.
+                this.ScheduleDebouncedCheck(250);
+            }
+
+            private void OnPoll(object state)
+            {
+                if (_disposed || Interlocked.Exchange(ref _polling, 1) != 0) return;
+                try
+                {
+                    bool exists = File.Exists(FilePath);
+                    bool previouslyExisted = _lastObservedExists;
+                    _lastObservedExists = exists;
+                    if (!exists) return;
+
+                    // A delete/recreate save sequence can be missed between two watcher events.
+                    if (!previouslyExisted)
+                    {
+                        this.ScheduleDebouncedCheck(150);
+                        return;
+                    }
+
+                    FileInfo info;
+                    try { info = new FileInfo(FilePath); info.Refresh(); }
+                    catch (IOException) { return; }
+                    catch (UnauthorizedAccessException) { return; }
+
+                    long baselineLength;
+                    DateTime baselineWriteUtc;
+                    string baselineFingerprint;
+                    lock (_stateLock)
+                    {
+                        baselineLength = _lastProcessedLength;
+                        baselineWriteUtc = _lastProcessedWriteUtc;
+                        baselineFingerprint = _lastProcessedFingerprint;
+                    }
+
+                    if (info.Length != baselineLength || info.LastWriteTimeUtc != baselineWriteUtc)
+                    {
+                        this.ScheduleDebouncedCheck(500);
+                        return;
+                    }
+
+                    // A few tools replace data while preserving length and timestamps. Check
+                    // their content periodically without loading the entire file into memory.
+                    DateTime now = DateTime.UtcNow;
+                    if (now - _lastFingerprintProbeUtc >= TimeSpan.FromSeconds(15))
+                    {
+                        _lastFingerprintProbeUtc = now;
+                        string currentFingerprint;
+                        try { currentFingerprint = this.ComputeFileFingerprint(); }
+                        catch (IOException) { return; }
+                        catch (UnauthorizedAccessException) { return; }
+                        if (!string.IsNullOrEmpty(baselineFingerprint) &&
+                            !string.Equals(currentFingerprint, baselineFingerprint, StringComparison.Ordinal))
+                            this.ScheduleDebouncedCheck(150);
+                    }
+                }
+                catch (ObjectDisposedException) { }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                finally
+                {
+                    Interlocked.Exchange(ref _polling, 0);
+                }
+            }
+
+            private void OnDebounce(object state)
+            {
+                if (_disposed || Interlocked.Exchange(ref _checking, 1) != 0) return;
+                bool retryCheck = false;
+                try
+                {
+                    bool stable = false;
+                    long length = 0;
+                    DateTime writeUtc = DateTime.MinValue;
+                    for (int attempt = 0; attempt < 12 && !_disposed; attempt++)
+                    {
+                        if (!File.Exists(FilePath)) { Thread.Sleep(250); continue; }
+                        long firstLength;
+                        DateTime firstWrite;
+                        try
+                        {
+                            var first = new FileInfo(FilePath);
+                            firstLength = first.Length;
+                            firstWrite = first.LastWriteTimeUtc;
+                        }
+                        catch (IOException) { Thread.Sleep(250); continue; }
+                        catch (UnauthorizedAccessException) { Thread.Sleep(250); continue; }
+                        Thread.Sleep(250);
+                        try
+                        {
+                            var second = new FileInfo(FilePath);
+                            length = second.Length;
+                            writeUtc = second.LastWriteTimeUtc;
+                        }
+                        catch (IOException) { continue; }
+                        catch (UnauthorizedAccessException) { continue; }
+                        if (firstLength == length && firstWrite == writeUtc)
+                        {
+                            stable = true;
+                            break;
+                        }
+                    }
+                    if (!stable || _disposed)
+                    {
+                        // Missing targets are handled by OnPoll when they reappear; avoid a
+                        // pointless retry loop while an editor intentionally has the file absent.
+                        retryCheck = !_disposed && File.Exists(FilePath);
+                        return;
+                    }
+
+                    string fingerprint;
+                    try { fingerprint = this.ComputeFileFingerprint(); }
+                    catch (IOException) { retryCheck = true; return; }
+                    catch (UnauthorizedAccessException) { retryCheck = true; return; }
+
+                    string baselineFingerprint;
+                    lock (_stateLock) baselineFingerprint = _lastProcessedFingerprint;
+                    if (!string.IsNullOrEmpty(baselineFingerprint) &&
+                        string.Equals(fingerprint, baselineFingerprint, StringComparison.Ordinal))
+                    {
+                        // The file may only have had its timestamp touched. Accept its new
+                        // metadata baseline so the polling fallback does not schedule the same
+                        // unchanged contents over and over.
+                        lock (_stateLock)
+                        {
+                            _lastProcessedLength = length;
+                            _lastProcessedWriteUtc = writeUtc;
+                            _lastProcessedFingerprint = fingerprint;
+                        }
+                        _lastObservedExists = true;
+                        _lastFingerprintProbeUtc = DateTime.UtcNow;
+                        return;
+                    }
+
+                    if (Interlocked.Exchange(ref _uiImportQueued, 1) != 0) return;
+                    try
+                    {
+                        if (_owner.IsDisposed || !_owner.IsHandleCreated) { Interlocked.Exchange(ref _uiImportQueued, 0); return; }
+                        _owner.BeginInvoke(new Action(() => _owner.HandleExternalFileChanged(this)));
+                    }
+                    catch (ObjectDisposedException) { Interlocked.Exchange(ref _uiImportQueued, 0); }
+                    catch (InvalidOperationException) { Interlocked.Exchange(ref _uiImportQueued, 0); }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _checking, 0);
+                    if (retryCheck && !_disposed)
+                        this.ScheduleDebouncedCheck(700);
+                }
+            }
+
+            public void MarkCurrentStateProcessed()
+            {
+                try
+                {
+                    if (File.Exists(FilePath))
+                    {
+                        var info = new FileInfo(FilePath);
+                        long length = info.Length;
+                        DateTime writeUtc = info.LastWriteTimeUtc;
+                        string fingerprint = this.ComputeFileFingerprint();
+                        lock (_stateLock)
+                        {
+                            _lastProcessedLength = length;
+                            _lastProcessedWriteUtc = writeUtc;
+                            _lastProcessedFingerprint = fingerprint;
+                        }
+                        _lastObservedExists = true;
+                        _lastFingerprintProbeUtc = DateTime.UtcNow;
+                    }
+                    else
+                    {
+                        _lastObservedExists = false;
+                    }
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                finally
+                {
+                    Interlocked.Exchange(ref _uiImportQueued, 0);
+                    Interlocked.Exchange(ref _transientImportFailures, 0);
+                }
+            }
+
+            public bool RetryAfterReadFailure()
+            {
+                if (_disposed) return false;
+                int failures = Interlocked.Increment(ref _transientImportFailures);
+                Interlocked.Exchange(ref _uiImportQueued, 0);
+                if (failures > 30) return false;
+                this.ScheduleDebouncedCheck(900);
+                return true;
+            }
+
+            private void UpdateBaseline()
+            {
+                if (!File.Exists(FilePath)) return;
+                try
+                {
+                    var info = new FileInfo(FilePath);
+                    long length = info.Length;
+                    DateTime writeUtc = info.LastWriteTimeUtc;
+                    string fingerprint = this.ComputeFileFingerprint();
+                    lock (_stateLock)
+                    {
+                        _lastProcessedLength = length;
+                        _lastProcessedWriteUtc = writeUtc;
+                        _lastProcessedFingerprint = fingerprint;
+                    }
+                }
+                catch { _lastProcessedFingerprint = null; }
+            }
+
+            private string ComputeFileFingerprint()
+            {
+                using (var input = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (SHA256 sha = SHA256.Create())
+                    return Convert.ToBase64String(sha.ComputeHash(input));
+            }
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _watcher.EnableRaisingEvents = false;
+                _watcher.Changed -= this.OnFileSystemEvent;
+                _watcher.Created -= this.OnFileSystemEvent;
+                _watcher.Deleted -= this.OnFileSystemEvent;
+                _watcher.Renamed -= this.OnFileRenamed;
+                _watcher.Error -= this.OnWatcherError;
+                _watcher.Dispose();
+                _pollTimer.Dispose();
+                _debounceTimer.Dispose();
+            }
+        }
+
+        private sealed class RcfAnimationSourceScanItem
+        {
+            internal RcfArchiveItem Item;
+            internal string Name;
+            internal long DataRevision;
+            internal Pure3DFile AnimationSourceFile;
+            internal Model3DViewer.PreparedAnimationSourceIndex PreparedAnimationIndex;
+            internal Dictionary<Animation, Func<Animation>> AnimationLoaders = new Dictionary<Animation, Func<Animation>>();
+            internal HashSet<string> RootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            internal string ParseError;
+            internal Endian SourceEndian = Endian.Little;
+            internal bool CacheSerializable = true;
+            internal long PersistentCacheBytes;
+            internal readonly List<RcfAnimationCachedChunk> CachedAnimations = new List<RcfAnimationCachedChunk>();
+            internal readonly List<byte[]> CachedSkeletonChunks = new List<byte[]>();
+
+            internal void ClearPersistentCacheData()
+            {
+                this.CachedAnimations.Clear();
+                this.CachedSkeletonChunks.Clear();
+                this.PersistentCacheBytes = 0;
+                this.CacheSerializable = false;
+            }
+        }
+
+        private sealed class RcfAnimationCachedChunk
+        {
+            internal long Offset;
+            internal Endian Endian;
+            internal byte[] MetadataBytes;
+
+            internal RcfAnimationCachedChunk() { }
+            internal RcfAnimationCachedChunk(long offset, Endian endian, byte[] metadataBytes)
+            {
+                this.Offset = offset;
+                this.Endian = endian;
+                this.MetadataBytes = metadataBytes;
+            }
+        }
+
+        private sealed class RcfAnimationCacheIdentity
+        {
+            internal string FullPath;
+            internal long Length;
+            internal long LastWriteTimeUtcTicks;
+        }
+
+        private sealed class RcfAnimationArchiveScanResult
+        {
+            internal readonly List<RcfAnimationSourceScanItem> Items = new List<RcfAnimationSourceScanItem>();
+            internal int AnimationCount;
+            internal int SkeletonCount;
+            internal bool CacheCanBePersisted;
+            internal bool LoadedFromDiskCache;
+        }
+
+        private sealed class RcfAnimationScanProgress
+        {
+            internal int Current;
+            internal int Total;
+            internal string EntryName;
+        }
+
+        private sealed class RcfAnimationScanProgressForm : Form
+        {
+            private readonly Label _statusLabel;
+            private readonly ProgressBar _progressBar;
+            private readonly string _language;
+
+            internal RcfAnimationScanProgressForm(string language, bool darkTheme, int total)
+            {
+                this._language = UiLocalization.NormalizeLanguageCode(language);
+                this.Text = UiLocalization.TranslateId("scan.rcfAnimations.title", "Индексация анимаций RCF", this._language);
+                this.FormBorderStyle = FormBorderStyle.FixedDialog;
+                this.StartPosition = FormStartPosition.CenterParent;
+                this.ShowInTaskbar = false;
+                this.ControlBox = false;
+                this.MinimizeBox = false;
+                this.MaximizeBox = false;
+                this.ClientSize = new Size(570, 112);
+                this.BackColor = darkTheme ? Color.FromArgb(32, 32, 34) : SystemColors.Control;
+                this.ForeColor = darkTheme ? Color.FromArgb(225, 225, 225) : SystemColors.ControlText;
+                this.Font = SystemFonts.MessageBoxFont;
+
+                this._statusLabel = new Label
+                {
+                    AutoSize = false,
+                    Left = 14,
+                    Top = 12,
+                    Width = 542,
+                    Height = 48,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    AutoEllipsis = true,
+                    BackColor = this.BackColor,
+                    ForeColor = this.ForeColor,
+                    Text = string.Format(UiLocalization.TranslateId("scan.rcfAnimations.status", "Сканирование записей RCF: {0}/{1}", this._language), 0, total)
+                };
+                this._progressBar = new ProgressBar
+                {
+                    Left = 14,
+                    Top = 70,
+                    Width = 542,
+                    Height = 24,
+                    Minimum = 0,
+                    Maximum = Math.Max(1, total),
+                    Value = 0,
+                    Style = ProgressBarStyle.Continuous,
+                    Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom
+                };
+                this.Controls.Add(this._statusLabel);
+                this.Controls.Add(this._progressBar);
+            }
+
+            internal void UpdateProgress(int current, int total, string entryName)
+            {
+                if (this.IsDisposed) return;
+                int safeTotal = Math.Max(1, total);
+                if (this._progressBar.Maximum != safeTotal) this._progressBar.Maximum = safeTotal;
+                current = Math.Max(0, Math.Min(safeTotal, current));
+                if (this._progressBar.Value > current) this._progressBar.Value = 0;
+                this._progressBar.Value = current;
+                string status = string.Format(UiLocalization.TranslateId("scan.rcfAnimations.status", "Сканирование записей RCF: {0}/{1}", this._language), current, safeTotal);
+                if (!string.IsNullOrWhiteSpace(entryName)) status += " — " + entryName;
+                this._statusLabel.Text = status;
+                this._statusLabel.Left = 14;
+            }
+        }
+
+        private sealed class RcfArchiveItem
+        {
+            private string _fallbackName;
+            private readonly CementFile _owner;
+            internal Entry Entry { get; private set; }
+            internal Metadata Metadata { get; private set; }
+            internal CementFile Owner => _owner;
+            internal Pure3DFile ParsedFile { get; set; }
+            // A memory-reduced, read-only P3D tree containing only Animation/Skeleton branches.
+            // Kept separate from ParsedFile so the RCF tree/editor still loads full data on demand.
+            internal Pure3DFile AnimationSourceFile { get; set; }
+            internal long AnimationSourceDataRevision { get; set; } = -1;
+            internal long AnimationCatalogScannedRevision { get; set; } = -1;
+            internal Dictionary<Animation, Func<Animation>> AnimationLoaders { get; set; } = new Dictionary<Animation, Func<Animation>>();
+            internal bool ParseAttempted { get; set; }
+            internal bool ParsedFileModified { get; set; }
+            internal string ParseError { get; set; }
+            internal bool TextureScanAttempted { get; set; }
+            internal List<RcfTextureHitInfo> TextureHits { get; set; }
+            internal string TextureScanError { get; set; }
+            internal HashSet<string> EmbeddedP3DRootTypes { get; set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            public RcfArchiveItem(CementFile owner, Entry entry, Metadata metadata, string fallbackName)
+            {
+                _owner = owner;
+                Entry = entry;
+                Metadata = metadata;
+                _fallbackName = fallbackName ?? string.Empty;
+            }
+
+            public string Name
+            {
+                // Return a safe display name while preserving Metadata.Name until the
+                // user actually edits it. This prevents padded metadata strings from
+                // reaching TreeView, filters or path helpers unchanged.
+                get { return MainForm.CleanRcfName(Metadata != null ? Metadata.Name : _fallbackName).TrimEnd('\0'); }
+                set
+                {
+                    string name = MainForm.CleanRcfName(value).TrimEnd('\0');
+                    if (Metadata != null) Metadata.Name = name;
+                    _fallbackName = name;
+                    TextureScanAttempted = false;
+                    TextureHits = null;
+                    TextureScanError = null;
+                    AnimationSourceFile = null;
+                    AnimationSourceDataRevision = -1;
+                    AnimationCatalogScannedRevision = -1;
+                    AnimationLoaders.Clear();
+                    EmbeddedP3DRootTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (Entry != null) Entry.Hash = Utils.RCFStringHash(name);
+                }
+            }
+
+            [ReadOnly(true)] public uint Hash => Entry != null ? Entry.Hash : 0;
+            [ReadOnly(true)] public long Size => Entry != null ? Entry.DataLength : 0;
+            [ReadOnly(true)] public string Extension => MainForm.GetRcfExtension(Name);
+            [ReadOnly(true)] public string Format => CanContainP3D ? "Pure3D" : (string.IsNullOrEmpty(Extension) ? "Бинарные данные" : Extension.TrimStart('.').ToUpperInvariant());
+            [ReadOnly(true)] public bool ContainsP3D => CanContainP3D;
+            [ReadOnly(true)] public string ParseStatus => !CanContainP3D ? "Не P3D/RZ" : !ParseAttempted ? "Не загружен" : ParsedFile != null ? ("Разобранных секций: " + ParsedFile.Nodes.Count) : ("Ошибка: " + (ParseError ?? "неизвестно"));
+            public uint Date
+            {
+                get { return Metadata != null ? Metadata.Date : 0; }
+                set { if (Metadata != null) Metadata.Date = value; }
+            }
+
+            [Browsable(false)] public bool CanContainP3D => Name.EndsWith(".p3d", StringComparison.OrdinalIgnoreCase) || Utils.IsRZFile(Name);
+
+            public override string ToString() => Name;
+        }
 
         private class NodeCacheItem
         {
@@ -1091,8 +10645,7 @@ namespace PrototypeUltimateTool
                 }
                 this.PixelCount = (long)w * h;
 
-                string text = this.DisplayText.ToLowerInvariant();
-                this.IsTexture = node.Exportable || text.Contains("texture") || text.Contains(".dds") || this.PixelCount > 0;
+                this.IsTexture = MainForm.IsTextureNode(node);
             }
 
             public bool Matches(string query)
@@ -1148,7 +10701,13 @@ namespace PrototypeUltimateTool
 
             protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
             {
-                if (_isDark())
+                // Keep hovered menu text readable even for disabled commands. The default
+                // WinForms menu highlight can otherwise combine a pale highlight with pale text.
+                if (e.Item.Selected)
+                {
+                    e.TextColor = _isDark() ? Color.White : SystemColors.HighlightText;
+                }
+                else if (_isDark())
                 {
                     if (e.Item.ForeColor == Color.Firebrick || e.Item.ForeColor == Color.IndianRed)
                         e.TextColor = Color.IndianRed;

@@ -1,0 +1,4 @@
+Current increment: OBJ material and normal export fix 1 (based on PrototypeUltimateTool_EditP3D_Stage4_MultiSelectFix2).
+Implemented: OBJ exports now reference a companion MTL, assign per-part materials, transfer diffuse shader colors where available, resolve texture references from shader metadata/fallback matching, and write only linked texture maps as PNG sidecars. Exported triangle winding is chosen against source normals when possible, and OBJ normals are regenerated from the exact exported face order.
+Static source delimiter checks, project XML validation, and export-path/material-token checks passed in this environment. No .NET SDK/MSBuild/C# compiler is available here; Visual Studio build and actual Blender runtime behavior are not verified.
+Do not consider this increment compile-verified until built with Visual Studio on Windows using the .NET Framework 4.8 Developer Pack.

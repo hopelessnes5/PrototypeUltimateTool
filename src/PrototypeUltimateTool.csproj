@@ -1,84 +1,76 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net48</TargetFramework>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <!-- Ensure Restore creates the win-x64 assets target used by automatic single-file Publish. -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
     <PlatformTarget>x64</PlatformTarget>
-    <LangVersion>7.3</LangVersion>
+    <LangVersion>13.0</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>PrototypeUltimateTool</RootNamespace>
     <AssemblyName>PrototypeUltimateTool</AssemblyName>
     <Deterministic>true</Deterministic>
     <DebugType>portable</DebugType>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
   </PropertyGroup>
 
+  <!-- Keep the standalone generated-mesh experiment isolated. The integrated viewer backend lives in Modules/Rendering. -->
+  <ItemGroup>
+    <Compile Remove="Experiments\DirectX12SkinningPrototype\**\*.cs" />
+    <Compile Remove="Modules\Core\Numeric\Half\Half.cs" />
+    <Compile Remove="Modules\Core\Numeric\Half\HalfHelper.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Languages\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Languages\README.md" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Keep the HLSL source in the project, but embed it into the application assembly. -->
+    <None Remove="Shaders\Dx12Wireframe.hlsl" />
+    <EmbeddedResource Include="Shaders\Dx12Wireframe.hlsl">
+      <LogicalName>PrototypeUltimateTool.Shaders.Dx12Wireframe.hlsl</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
   <!--
-    Nixson.Prototype1 and Nixson.Prototype2 are compiled into this EXE.
-    Nixson.Common is built from source as a separate intermediate assembly to
-    preserve the identity required by Gibbed.Prototype.FileFormats, then embedded.
-
-    The remaining Gibbed/System.Half assemblies are compile-time references and
-    embedded resources; the resolver loads them from the EXE at runtime.
+    A regular Visual Studio Build also creates a framework-dependent single-file EXE.
+    The application and its managed/native package dependencies are bundled, but the
+    .NET 9 Windows Desktop Runtime is intentionally NOT bundled; users install it once.
+    Language catalogs and settings remain external files; the DX12 HLSL shader is embedded in the application assembly.
   -->
-  <!--
-    Gibbed.Prototype.FileFormats was compiled against the assembly identity
-    Nixson.Common, Version=1.0.0.0. Keep Nixson.Common as a separately compiled
-    project (from our source), then embed its output in this EXE. Compiling its
-    types directly into this assembly would not satisfy that metadata reference.
-  -->
-  <ItemGroup>
-    <Compile Remove="Source\Nixson.Common\**\*.cs" />
-    <ProjectReference Include="Source\Nixson.Common\Nixson.Common.csproj">
-      <Private>false</Private>
-    </ProjectReference>
-  </ItemGroup>
+  <Target Name="PublishSingleFileAfterBuild"
+          AfterTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true'
+                  and '$(BuildSingleFileInner)' != 'true'
+                  and '$(PublishSingleFile)' != 'true'
+                  and '$(IsCrossTargetingBuild)' != 'true'">
+    <Message Importance="high" Text="Publishing framework-dependent single-file EXE (requires .NET 9 Windows Desktop Runtime) into $(TargetDir)..." />
 
-  <ItemGroup>
-    <Reference Include="Gibbed.IO">
-      <HintPath>Dependencies\Gibbed.IO.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="Gibbed.Prototype.FileFormats">
-      <HintPath>Dependencies\Gibbed.Prototype.FileFormats.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="Gibbed.Squish">
-      <HintPath>Dependencies\Gibbed.Squish.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="System.Half">
-      <HintPath>Dependencies\System.Half.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-  </ItemGroup>
+    <MSBuild Projects="$(MSBuildProjectFullPath)"
+             Targets="Publish"
+             BuildInParallel="false"
+             Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);RuntimeIdentifier=win-x64;SelfContained=false;PublishSingleFile=true;IncludeNativeLibrariesForSelfExtract=true;IncludeAllContentForSelfExtract=false;IncludeSymbolsInSingleFile=false;EnableCompressionInSingleFile=false;PublishTrimmed=false;PublishReadyToRun=false;AppendRuntimeIdentifierToOutputPath=false;BuildSingleFileInner=true;PublishDir=$(TargetDir)" />
 
-  <ItemGroup>
-    <EmbeddedResource Include="Dependencies\Gibbed.IO.dll">
-      <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.Gibbed.IO.dll</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Dependencies\Gibbed.Prototype.FileFormats.dll">
-      <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.Gibbed.Prototype.FileFormats.dll</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Dependencies\Gibbed.Squish.dll">
-      <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.Gibbed.Squish.dll</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Dependencies\System.Half.dll">
-      <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.System.Half.dll</LogicalName>
-    </EmbeddedResource>
-  </ItemGroup>
-
-  <!-- The project reference above is built during ResolveReferences. Embed the
-       resulting source-built assembly only after that build has completed. -->
-  <Target Name="EmbedNixsonCommonAssembly" AfterTargets="ResolveReferences" Condition="'$(DesignTimeBuild)' != 'true'">
-    <PropertyGroup>
-      <NixsonCommonAssemblyPath>$(MSBuildProjectDirectory)\Source\Nixson.Common\bin\$(Configuration)\net48\Nixson.Common.dll</NixsonCommonAssemblyPath>
-    </PropertyGroup>
-    <Error Condition="!Exists('$(NixsonCommonAssemblyPath)')"
-           Text="Nixson.Common was not built from source at '$(NixsonCommonAssemblyPath)'. Check the Source\Nixson.Common project reference." />
+    <!-- Remove loose build outputs once the single-file apphost has been published. -->
     <ItemGroup>
-      <EmbeddedResource Include="$(NixsonCommonAssemblyPath)">
-        <LogicalName>PrototypeUltimateTool.EmbeddedDependencies.Nixson.Common.dll</LogicalName>
-      </EmbeddedResource>
+      <_SingleFileLooseOutput Include="$(TargetDir)*.dll" />
+      <_SingleFileLooseOutput Include="$(TargetDir)*.deps.json" />
+      <_SingleFileLooseOutput Include="$(TargetDir)*.runtimeconfig.json" />
+      <_SingleFileLooseOutput Include="$(TargetDir)*.pdb" />
     </ItemGroup>
+    <Delete Files="@(_SingleFileLooseOutput)" />
+
+    <!-- Remove RID-specific output left by earlier self-contained configuration/builds. -->
+    <RemoveDir Directories="$(TargetDir)win-x64" Condition="Exists('$(TargetDir)win-x64')" />
+    <RemoveDir Directories="$(TargetDir)runtimes" Condition="Exists('$(TargetDir)runtimes')" />
+    <!-- Remove the old loose shader folder from output left by builds before it was embedded. -->
+    <RemoveDir Directories="$(TargetDir)Shaders" Condition="Exists('$(TargetDir)Shaders')" />
   </Target>
 </Project>
